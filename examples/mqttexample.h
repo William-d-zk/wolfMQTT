@@ -1,6 +1,6 @@
 /* mqttexample.h
  *
- * Copyright (C) 2006-2020 wolfSSL Inc.
+ * Copyright (C) 2006-2022 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -28,8 +28,8 @@
 
 /* Compatibility Options */
 #ifdef NO_EXIT
-	#undef exit
-	#define exit(rc) return rc
+    #undef exit
+    #define exit(rc) return rc
 #endif
 
 #ifndef MY_EX_USAGE
@@ -62,6 +62,16 @@
 
 
 /* Default Configurations */
+
+#ifndef DEFAULT_MQTT_HOST
+    /* Default MQTT host broker to use,
+     * when none is specified in the examples */
+    #define DEFAULT_MQTT_HOST   "test.mosquitto.org"
+    /* "iot.eclipse.org" */
+    /* "broker.emqx.io" */
+    /* "broker.hivemq.com" */
+#endif
+
 #define DEFAULT_CMD_TIMEOUT_MS  30000
 #define DEFAULT_CON_TIMEOUT_MS  5000
 #define DEFAULT_MQTT_QOS        MQTT_QOS_0
@@ -74,8 +84,10 @@
 #define DEFAULT_MESSAGE         "test"
 
 #ifdef WOLFMQTT_V5
-#define DEFAULT_MAX_PKT_SZ      768 /* The max MQTT control packet size the
-                                       client is willing to accept. */
+#define DEFAULT_MAX_PKT_SZ      1024*1024 /* The max MQTT control packet size
+                                             the client is willing to accept. */
+#define DEFAULT_SUB_ID          1 /* Sub ID starts at 1 */
+#define DEFAULT_SESS_EXP_INT    0xFFFFFFFF
 #endif
 
 /* MQTT Client state */
@@ -88,6 +100,7 @@ typedef enum _MQTTCtxState {
     WMQ_SUB,
     WMQ_PUB,
     WMQ_WAIT_MSG,
+    WMQ_PING,
     WMQ_UNSUB,
     WMQ_DISCONNECT,
     WMQ_NET_DISCONNECT,
@@ -138,8 +151,8 @@ typedef struct _MQTTCtx {
     int      max_packet_size;
 #endif
     word32 cmd_timeout_ms;
-#if defined(WOLFMQTT_NONBLOCK)
-    word32  start_sec; /* used for keep-alive */
+#ifdef WOLFMQTT_NONBLOCK
+    word32 start_sec; /* used for timeout and keep-alive */
 #endif
     word16 keep_alive_sec;
     word16 port;
@@ -174,6 +187,8 @@ word16 mqtt_get_packetid(void);
 #ifdef WOLFMQTT_NONBLOCK
 int mqtt_check_timeout(int rc, word32* start_sec, word32 timeout_sec);
 #endif
+
+int mqtt_file_load(const char* filePath, byte** fileBuf, int *fileLen);
 
 #ifdef __cplusplus
     } /* extern "C" */

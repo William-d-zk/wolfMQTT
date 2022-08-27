@@ -1,6 +1,6 @@
 /* mqtt_packet.h
  *
- * Copyright (C) 2006-2020 wolfSSL Inc.
+ * Copyright (C) 2006-2022 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -40,7 +40,12 @@
 #define MQTT_DATA_INT_SIZE   4
 
 #ifndef MAX_PACKET_ID
-#define MAX_PACKET_ID           ((1 << 16) - 1)
+#define MAX_PACKET_ID        ((1 << 16) - 1)
+#endif
+
+/* maximum list of topics to subscribe at once */
+#ifndef MAX_MQTT_TOPICS
+#define MAX_MQTT_TOPICS      12
 #endif
 
 #ifdef WOLFMQTT_V5
@@ -189,7 +194,6 @@ typedef struct _MqttTopic {
     MqttQoS     qos; /* Bits 0-1 = MqttQoS */
     byte        return_code; /* MqttSubscribeAckReturnCodes */
 #ifdef WOLFMQTT_V5
-    byte        sub_id;
     word16      alias;
 #endif
 } MqttTopic;
@@ -255,7 +259,7 @@ enum MqttPacketFlags {
 
 /* Packet Header: Size is variable 2 - 5 bytes */
 #define MQTT_PACKET_MAX_LEN_BYTES   4
-#define MQTT_PACKET_LEN_ENCODE_MASK 0x80
+#define MQTT_PACKET_LEN_ENCODE_MASK 0x80UL
 typedef struct _MqttPacket {
     /* Type = bits 4-7, Flags = 0-3 are flags */
     byte        type_flags; /* MqttPacketType and MqttPacketFlags */
@@ -273,16 +277,25 @@ typedef struct _MqttPacket {
 
 
 /* Generic Message */
-typedef enum _MqttMsgStat {
+typedef enum _MqttMsgState {
     MQTT_MSG_BEGIN = 0, /* must be zero, so memset will setup state */
-#ifdef WOLFMQTT_V5
-    MQTT_MSG_AUTH,
-#endif
     MQTT_MSG_WAIT,
-    MQTT_MSG_WRITE,
-    MQTT_MSG_WRITE_PAYLOAD,
-    MQTT_MSG_READ,
-    MQTT_MSG_READ_PAYLOAD,
+    MQTT_MSG_AUTH,
+    MQTT_MSG_HEADER,
+    MQTT_MSG_PAYLOAD,
+    MQTT_MSG_PAYLOAD2,
+    MQTT_MSG_ACK,
+} MqttMsgState;
+
+/* Generic message status tracking */
+typedef struct _MqttMsgStat {
+    MqttMsgState read;
+    MqttMsgState write;
+
+#ifdef WOLFMQTT_MULTITHREAD
+    byte isReadLocked:1;
+    byte isWriteLocked:1;
+#endif
 } MqttMsgStat;
 
 #ifdef WOLFMQTT_MULTITHREAD
@@ -444,8 +457,9 @@ typedef struct _MqttPublishResp {
 #ifdef WOLFMQTT_MULTITHREAD
     MqttPendResp pendResp;
 #endif
-
     word16      packet_id;
+    byte        packet_type; /* type to send */
+    
 #ifdef WOLFMQTT_V5
     byte reason_code;
     MqttProp* props;
@@ -509,7 +523,7 @@ typedef struct _MqttSubscribeAck {
     MqttMsgStat stat; /* must be first member at top */
 
     word16      packet_id;
-    byte       *return_codes; /* MqttSubscribeAckReturnCodes */
+    byte        return_codes[MAX_MQTT_TOPICS];
 #ifdef WOLFMQTT_V5
     MqttProp* props;
     byte protocol_level;
@@ -612,6 +626,7 @@ typedef struct _MqttAuth {
 
 /* Generic MQTT struct for packet types */
 typedef union _MqttObject {
+    MqttMsgStat        stat; /* all objects types have this at top of struct */
     MqttConnect        connect;
     MqttConnectAck     connect_ack;
     MqttPublish        publish;

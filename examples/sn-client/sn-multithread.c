@@ -1,6 +1,6 @@
 /* sn-multithread.c
  *
- * Copyright (C) 2006-2020 wolfSSL Inc.
+ * Copyright (C) 2006-2022 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -41,17 +41,20 @@
 /* Number of publish tasks. Each will send a unique message to the broker. */
 #define NUM_PUB_TASKS   10
 
-
 /* Locals */
 static int mStopRead = 0;
-static int mNumMsgsRecvd;
-static word16 topicID;
+
 
 #if defined(WOLFMQTT_MULTITHREAD) && defined(WOLFMQTT_SN)
 
+/* Locals */
+static int mNumMsgsRecvd;
+static word16 topicID;
+
+
 #ifdef USE_WINDOWS_API
     /* Windows Threading */
-	#include <windows.h>
+    #include <windows.h>
     #include <process.h>
     typedef HANDLE THREAD_T;
     #define THREAD_CREATE(h, f, c) *h = CreateThread(NULL, 0, f, c, 0, NULL)
@@ -59,8 +62,8 @@ static word16 topicID;
     #define THREAD_EXIT(e)         return e;
 #else
     /* Posix (Linux/Mac) */
-	#include <pthread.h>
-	#include <sched.h>
+    #include <pthread.h>
+    #include <sched.h>
     typedef pthread_t THREAD_T;
     #define THREAD_CREATE(h, f, c) ({ int ret = pthread_create(h, NULL, f, c); if (ret) { errno = ret; } ret; })
     #define THREAD_JOIN(h, c)      ({ int ret, x; for(x=0;x<c;x++) { ret = pthread_join(h[x], NULL); if (ret) { errno = ret; break; }} ret; })
@@ -101,8 +104,6 @@ static int sn_message_cb(MqttClient *client, MqttMessage *msg,
     word16 topicId;
     MQTTCtx* mqttCtx = (MQTTCtx*)client->ctx;
 
-    (void)mqttCtx;
-
     if (msg_new) {
         /* Topic ID or short topic name */
         topicId = (word16)(msg->topic_name[0] << 8 | msg->topic_name[1]);
@@ -112,7 +113,7 @@ static int sn_message_cb(MqttClient *client, MqttMessage *msg,
                 topicId, msg->qos, msg->packet_id, msg->total_len);
 
         /* for test mode: count the number of TEST_MESSAGE matches received */
-        if (mqttCtx->test_mode) {
+        if (mqttCtx != NULL && mqttCtx->test_mode) {
             if (XSTRLEN(TEST_MESSAGE) == msg->buffer_len &&
                 /* Only compare the "test" part */
                 XSTRNCMP(TEST_MESSAGE, (char*)msg->buffer,
@@ -320,7 +321,7 @@ static int multithread_test_init(MQTTCtx *mqttCtx)
         rc = SN_Client_Connect(&mqttCtx->client, &connect);
     } while (rc == MQTT_CODE_CONTINUE || rc == MQTT_CODE_STDIN_WAKE);
 
-    PRINTF("MQTT-SN Connect return code: %s (%d)", 
+    PRINTF("MQTT-SN Connect return code: %s (%d)",
         MqttClient_ReturnCodeToString(rc), rc);
     if (rc != MQTT_CODE_SUCCESS) {
         client_disconnect(mqttCtx);
@@ -345,7 +346,7 @@ static int multithread_test_finish(MQTTCtx *mqttCtx)
 
 /* this task subscribes to topic */
 #ifdef USE_WINDOWS_API
-static DWORD WINAPI subscribe_task( LPVOID param ) 
+static DWORD WINAPI subscribe_task( LPVOID param )
 #else
 static void *subscribe_task(void *param)
 #endif
@@ -374,7 +375,7 @@ static void *subscribe_task(void *param)
 
 /* This task waits for messages */
 #ifdef USE_WINDOWS_API
-static DWORD WINAPI waitMessage_task( LPVOID param ) 
+static DWORD WINAPI waitMessage_task( LPVOID param )
 #else
 static void *waitMessage_task(void *param)
 #endif
@@ -459,7 +460,7 @@ static void *waitMessage_task(void *param)
 /* This task publishes a message to the broker. The task will be created
    NUM_PUB_TASKS times, sending a unique message each time. */
 #ifdef USE_WINDOWS_API
-static DWORD WINAPI publish_task( LPVOID param ) 
+static DWORD WINAPI publish_task( LPVOID param )
 #else
 static void *publish_task(void *param)
 #endif
@@ -503,7 +504,7 @@ static void *publish_task(void *param)
 }
 
 #ifdef USE_WINDOWS_API
-static DWORD WINAPI ping_task( LPVOID param ) 
+static DWORD WINAPI ping_task( LPVOID param )
 #else
 static void *ping_task(void *param)
 #endif
@@ -588,9 +589,9 @@ int sn_multithread_test(MQTTCtx *mqttCtx)
         /* Join threads - wait for completion */
         if (THREAD_JOIN(threadList, threadCount)) {
 #ifdef __GLIBC__
-            PRINTF("THREAD_JOIN failed: %m\n"); /* %m is specific to glibc/uclibc/musl, and recently (2018) added to FreeBSD */
+            PRINTF("THREAD_JOIN failed: %m"); /* %m is specific to glibc/uclibc/musl, and recently (2018) added to FreeBSD */
 #else
-            PRINTF("THREAD_JOIN failed: %d\n",errno);
+            PRINTF("THREAD_JOIN failed: %d",errno);
 #endif
         }
 
@@ -626,7 +627,8 @@ int sn_multithread_test(MQTTCtx *mqttCtx)
             if (signo == SIGINT) {
                 mStopRead = 1;
                 PRINTF("Received SIGINT");
-            #ifdef WOLFMQTT_ENABLE_STDIN_CAP
+            #if defined(WOLFMQTT_MULTITHREAD) && defined(WOLFMQTT_SN) && \
+                defined(WOLFMQTT_ENABLE_STDIN_CAP)
                 MqttClientNet_Wake(&gMqttCtx.net);
             #endif
             }

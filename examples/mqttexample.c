@@ -1,6 +1,6 @@
 /* mqttexample.c
  *
- * Copyright (C) 2006-2020 wolfSSL Inc.
+ * Copyright (C) 2006-2022 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -42,7 +42,14 @@ static char* myoptarg = NULL;
 static const char* mTlsCaFile;
 static const char* mTlsCertFile;
 static const char* mTlsKeyFile;
+#ifdef HAVE_SNI
+static int useSNI;
+static const char* mTlsSniHostName;
 #endif
+#ifdef HAVE_PQC
+static const char* mTlsPQAlg;
+#endif
+#endif /* ENABLE_MQTT_TLS */
 
 static int mygetopt(int argc, char** argv, const char* optstring)
 {
@@ -102,6 +109,20 @@ static int mygetopt(int argc, char** argv, const char* optstring)
         }
         else
             return '?';
+    }
+    else if (*cp == ';') {
+        myoptarg = (char*)"";
+        if (*next != '\0') {
+            myoptarg = next;
+            next     = NULL;
+        }
+        else if (myoptind < argc) {
+            /* Check if next argument is not a parameter argument */
+            if (argv[myoptind] && argv[myoptind][0] != '-') {
+                myoptarg = argv[myoptind];
+                myoptind++;
+            }
+        }
     }
 
     return c;
@@ -176,17 +197,31 @@ void mqtt_show_usage(MQTTCtx* mqttCtx)
     PRINTF("-?          Help, print this usage");
     PRINTF("-h <host>   Host to connect to, default: %s",
             mqttCtx->host);
+    /* Remove TLS and SNI args for sn-client */ 
+    if(XSTRNCMP(mqttCtx->app_name, "sn-client", 10)){
 #ifdef ENABLE_MQTT_TLS
-    PRINTF("-p <num>    Port to connect on, default: Normal %d, TLS %d",
-            MQTT_DEFAULT_PORT, MQTT_SECURE_PORT);
-    PRINTF("-t          Enable TLS");
-    PRINTF("-A <file>   Load CA (validate peer)");
-    PRINTF("-K <key>    Use private key (for TLS mutual auth)");
-    PRINTF("-c <cert>   Use certificate (for TLS mutual auth)");
-#else
-    PRINTF("-p <num>    Port to connect on, default: %d",
-            MQTT_DEFAULT_PORT);
+        PRINTF("-p <num>    Port to connect on, default: Normal %d, TLS %d",
+                MQTT_DEFAULT_PORT, MQTT_SECURE_PORT);
+        PRINTF("-t          Enable TLS");
+        PRINTF("-A <file>   Load CA (validate peer)");
+        PRINTF("-K <key>    Use private key (for TLS mutual auth)");
+        PRINTF("-c <cert>   Use certificate (for TLS mutual auth)");
+#ifdef HAVE_SNI
+        PRINTF("-S <str>    Use Host Name Indication, blank defaults to host");
 #endif
+#ifdef HAVE_PQC
+        PRINTF("-Q <str>    Use Key Share with post-quantum algorithm");
+#endif
+#else
+        PRINTF("-p <num>    Port to connect on, default: %d",
+             MQTT_DEFAULT_PORT);
+#endif
+    }
+    
+    else{
+        PRINTF("-p <num>    Port to connect on, default: %d",
+             MQTT_DEFAULT_PORT);
+    }
     PRINTF("-q <num>    Qos Level 0-2, default: %d",
             mqttCtx->qos);
     PRINTF("-s          Disable clean session connect flag");
@@ -210,10 +245,7 @@ void mqtt_show_usage(MQTTCtx* mqttCtx)
             DEFAULT_MAX_PKT_SZ);
 #endif
     PRINTF("-T          Test mode");
-    if (mqttCtx->pub_file) {
-        PRINTF("-f <file>   Use file for publish, default: %s",
-                mqttCtx->pub_file);
-    }
+    PRINTF("-f <file>   Use file contents for publish");
 }
 
 void mqtt_init_ctx(MQTTCtx* mqttCtx)
@@ -238,7 +270,7 @@ int mqtt_parse_args(MQTTCtx* mqttCtx, int argc, char** argv)
     int rc;
 
     #ifdef ENABLE_MQTT_TLS
-        #define MQTT_TLS_ARGS "c:A:K:"
+        #define MQTT_TLS_ARGS "c:A:K:S;Q:"
     #else
         #define MQTT_TLS_ARGS ""
     #endif
@@ -336,6 +368,21 @@ int mqtt_parse_args(MQTTCtx* mqttCtx, int argc, char** argv)
         case 'K':
             mTlsKeyFile = myoptarg;
             break;
+        case 'S':
+        #ifdef HAVE_SNI
+            useSNI = 1;
+            mTlsSniHostName = myoptarg;
+        #else
+            PRINTF("To use '-S', enable SNI in wolfSSL");
+        #endif
+            break;
+        case 'Q':
+        #ifdef HAVE_PQC
+            mTlsPQAlg = myoptarg;
+        #else
+            PRINTF("To use '-Q', build wolfSSL with --with-liboqs");
+        #endif
+            break;
     #endif
 
     #ifdef WOLFMQTT_V5
@@ -347,6 +394,14 @@ int mqtt_parse_args(MQTTCtx* mqttCtx, int argc, char** argv)
         default:
             mqtt_show_usage(mqttCtx);
             return MY_EX_USAGE;
+        }
+    
+        /* Remove TLS and SNI functionality for sn-client */
+        if(!XSTRNCMP(mqttCtx->app_name, "sn-client", 10)){
+            mqttCtx->use_tls = 0;
+        #ifdef HAVE_SNI    
+            useSNI=0;
+        #endif
         }
     }
 
@@ -361,6 +416,13 @@ int mqtt_parse_args(MQTTCtx* mqttCtx, int argc, char** argv)
         if (mqttCtx->test_mode) {
             return MY_EX_USAGE;
         }
+    }
+#endif
+
+#ifdef HAVE_SNI
+    if ((useSNI == 1) && (XSTRLEN(mTlsSniHostName) == 0)) {
+        /* Set SNI host name to host if -S was blank */
+        mTlsSniHostName = mqttCtx->host;
     }
 #endif
 
@@ -425,10 +487,10 @@ word16 mqtt_get_packetid(void)
 }
 
 #ifdef WOLFMQTT_NONBLOCK
-    #if defined(MICROCHIP_MPLAB_HARMONY)
-        #include <system/tmr/sys_tmr.h>
-    #else
-        #include <time.h>
+#if defined(MICROCHIP_MPLAB_HARMONY)
+    #include <system/tmr/sys_tmr.h>
+#else
+    #include <time.h>
 #endif
 
 static word32 mqtt_get_timer_seconds(void)
@@ -506,7 +568,10 @@ int mqtt_tls_cb(MqttClient* client)
 {
     int rc = WOLFSSL_FAILURE;
 
-    client->tls.ctx = wolfSSL_CTX_new(wolfTLSv1_2_client_method());
+    /* Use highest available and allow downgrade. If wolfSSL is built with
+     * old TLS support, it is possible for a server to force a downgrade to
+     * an insecure version. */
+    client->tls.ctx = wolfSSL_CTX_new(wolfSSLv23_client_method());
     if (client->tls.ctx) {
         wolfSSL_CTX_set_verify(client->tls.ctx, WOLFSSL_VERIFY_PEER,
                 mqtt_tls_verify_cb);
@@ -521,7 +586,7 @@ int mqtt_tls_cb(MqttClient* client)
             rc = wolfSSL_CTX_load_verify_locations(client->tls.ctx,
                 mTlsCaFile, NULL);
             if (rc != WOLFSSL_SUCCESS) {
-                PRINTF("Error loading CA %s: %d (%s)", mTlsCaFile, 
+                PRINTF("Error loading CA %s: %d (%s)", mTlsCaFile,
                     rc, wolfSSL_ERR_reason_error_string(rc));
                 return rc;
             }
@@ -531,14 +596,14 @@ int mqtt_tls_cb(MqttClient* client)
             rc = wolfSSL_CTX_use_certificate_file(client->tls.ctx,
                 mTlsCertFile, WOLFSSL_FILETYPE_PEM);
             if (rc != WOLFSSL_SUCCESS) {
-                PRINTF("Error loading certificate %s: %d (%s)", mTlsCertFile, 
+                PRINTF("Error loading certificate %s: %d (%s)", mTlsCertFile,
                     rc, wolfSSL_ERR_reason_error_string(rc));
                 return rc;
             }
             rc = wolfSSL_CTX_use_PrivateKey_file(client->tls.ctx,
                 mTlsKeyFile, WOLFSSL_FILETYPE_PEM);
             if (rc != WOLFSSL_SUCCESS) {
-                PRINTF("Error loading key %s: %d (%s)", mTlsKeyFile, 
+                PRINTF("Error loading key %s: %d (%s)", mTlsKeyFile,
                     rc, wolfSSL_ERR_reason_error_string(rc));
                 return rc;
             }
@@ -564,6 +629,41 @@ int mqtt_tls_cb(MqttClient* client)
     #endif
     #endif /* !NO_FILESYSTEM */
 #endif /* !NO_CERT */
+#ifdef HAVE_SNI
+        if ((rc == WOLFSSL_SUCCESS) && (mTlsSniHostName != NULL)) {
+            rc = wolfSSL_CTX_UseSNI(client->tls.ctx, WOLFSSL_SNI_HOST_NAME,
+                    mTlsSniHostName, (word16) XSTRLEN(mTlsSniHostName));
+            if (rc != WOLFSSL_SUCCESS) {
+                PRINTF("UseSNI failed");
+            }
+        }
+#endif /* HAVE_SNI */
+#ifdef HAVE_PQC
+        if ((rc == WOLFSSL_SUCCESS) && (mTlsPQAlg != NULL)) {
+            int group = 0;
+            if (XSTRCMP(mTlsPQAlg, "KYBER_LEVEL1") == 0) {
+                group = WOLFSSL_KYBER_LEVEL1;
+            } else if (XSTRCMP(mTlsPQAlg, "P256_KYBER_LEVEL1") == 0) {
+                group = WOLFSSL_P256_KYBER_LEVEL1;
+            } else {
+                PRINTF("Invalid post-quantum KEM specified");
+            }
+
+            if (group != 0) {
+                client->tls.ssl = wolfSSL_new(client->tls.ctx);
+                if (client->tls.ssl == NULL) {
+                    rc = WOLFSSL_FAILURE;
+                }
+
+                if (rc == WOLFSSL_SUCCESS) {
+                    rc = wolfSSL_UseKeyShare(client->tls.ssl, group);
+                    if (rc != WOLFSSL_SUCCESS) {
+                        PRINTF("Use key share failed");
+                    }
+                }
+            }
+        }
+#endif /* HAVE_PQC */
     }
 
     PRINTF("MQTT TLS Setup (%d)", rc);
@@ -577,3 +677,86 @@ int mqtt_tls_cb(MqttClient* client)
     return 0;
 }
 #endif /* ENABLE_MQTT_TLS */
+
+int mqtt_file_load(const char* filePath, byte** fileBuf, int *fileLen)
+{
+#if !defined(NO_FILESYSTEM)
+    int rc = 0;
+    FILE* file = NULL;
+    long int pos = -1L;
+
+    /* Check arguments */
+    if (filePath == NULL || XSTRLEN(filePath) == 0 || fileLen == NULL ||
+        fileBuf == NULL) {
+        return MQTT_CODE_ERROR_BAD_ARG;
+    }
+
+    /* Open file */
+    file = fopen(filePath, "rb");
+    if (file == NULL) {
+        PRINTF("File '%s' does not exist!", filePath);
+        rc = EXIT_FAILURE;
+        goto exit;
+    }
+
+    /* Determine length of file */
+    if (fseek(file, 0, SEEK_END) != 0) {
+        PRINTF("fseek() failed");
+        rc = EXIT_FAILURE;
+        goto exit;
+     }
+
+    pos = (int) ftell(file);
+    if (pos == -1L) {
+       PRINTF("ftell() failed");
+       rc = EXIT_FAILURE;
+       goto exit;
+    }
+
+    *fileLen = (int)pos;
+    if (fseek(file, 0, SEEK_SET) != 0) {
+        PRINTF("fseek() failed");
+        rc = EXIT_FAILURE;
+        goto exit;
+     }
+#ifdef DEBUG_WOLFMQTT
+    PRINTF("File %s is %d bytes", filePath, *fileLen);
+#endif
+
+    /* Allocate buffer for image */
+    *fileBuf = (byte*)WOLFMQTT_MALLOC(*fileLen);
+    if (*fileBuf == NULL) {
+        PRINTF("File buffer malloc failed!");
+        rc = MQTT_CODE_ERROR_MEMORY;
+        goto exit;
+    }
+
+    /* Load file into buffer */
+    rc = (int)fread(*fileBuf, 1, *fileLen, file);
+    if (rc != *fileLen) {
+        PRINTF("Error reading file! %d", rc);
+        rc = EXIT_FAILURE;
+        goto exit;
+    }
+    rc = 0; /* Success */
+
+exit:
+    if (file) {
+        fclose(file);
+    }
+    if (rc != 0) {
+        if (*fileBuf) {
+            WOLFMQTT_FREE(*fileBuf);
+            *fileBuf = NULL;
+        }
+    }
+    return rc;
+
+#else
+    (void)filePath;
+    (void)fileBuf;
+    (void)fileLen;
+    PRINTF("File system support is not configured.");
+    return EXIT_FAILURE;
+#endif
+}

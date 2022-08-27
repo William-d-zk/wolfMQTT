@@ -1,6 +1,6 @@
 /* fwpush.c
  *
- * Copyright (C) 2006-2020 wolfSSL Inc.
+ * Copyright (C) 2006-2022 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -35,7 +35,7 @@
 
     /* The signature wrapper for this example was added in wolfSSL after 3.7.1 */
     #if defined(LIBWOLFSSL_VERSION_HEX) && LIBWOLFSSL_VERSION_HEX > 0x03007001 \
-    	    && defined(HAVE_ECC) && !defined(NO_SIG_WRAPPER)
+            && defined(HAVE_ECC) && !defined(NO_SIG_WRAPPER)
         #undef ENABLE_FIRMWARE_EXAMPLE
         #define ENABLE_FIRMWARE_EXAMPLE
     #endif
@@ -130,72 +130,10 @@ static int mqtt_publish_cb(MqttPublish *publish) {
             }
         }
     }
+#else
+    (void)publish;
 #endif
     return ret;
-}
-
-static int fwfile_load(const char* filePath, byte** fileBuf, int *fileLen)
-{
-#if !defined(NO_FILESYSTEM)
-    int rc = 0;
-    FILE* file = NULL;
-
-    /* Check arguments */
-    if (filePath == NULL || XSTRLEN(filePath) == 0 || fileLen == NULL ||
-        fileBuf == NULL) {
-        return EXIT_FAILURE;
-    }
-
-    /* Open file */
-    file = fopen(filePath, "rb");
-    if (file == NULL) {
-        PRINTF("File %s does not exist!", filePath);
-        rc = EXIT_FAILURE;
-        goto exit;
-    }
-
-    /* Determine length of file */
-    fseek(file, 0, SEEK_END);
-    *fileLen = (int) ftell(file);
-    fseek(file, 0, SEEK_SET);
-    //PRINTF("File %s is %d bytes", filePath, *fileLen);
-
-    /* Allocate buffer for image */
-    *fileBuf = (byte*)WOLFMQTT_MALLOC(*fileLen);
-    if (*fileBuf == NULL) {
-        PRINTF("File buffer malloc failed!");
-        rc = EXIT_FAILURE;
-        goto exit;
-    }
-
-    /* Load file into buffer */
-    rc = (int)fread(*fileBuf, 1, *fileLen, file);
-    if (rc != *fileLen) {
-        PRINTF("Error reading file! %d", rc);
-        rc = EXIT_FAILURE;
-        goto exit;
-    }
-    rc = 0; /* Success */
-
-exit:
-    if (file) {
-        fclose(file);
-    }
-    if (rc != 0) {
-        if (*fileBuf) {
-            WOLFMQTT_FREE(*fileBuf);
-            *fileBuf = NULL;
-        }
-    }
-    return rc;
-
-#else
-    (void)filePath;
-    (void)fileBuf;
-    (void)fileLen;
-    #warning No filesystem, so need way to load example firmware file to publish
-    return 0;
-#endif
 }
 
 static int fw_message_build(MQTTCtx *mqttCtx, const char* fwFile,
@@ -212,7 +150,7 @@ static int fw_message_build(MQTTCtx *mqttCtx, const char* fwFile,
     wc_InitRng(&rng);
 
     /* Verify file can be loaded */
-    rc = fwfile_load(fwFile, &fwBuf, &fwLen);
+    rc = mqtt_file_load(fwFile, &fwBuf, &fwLen);
     if (rc < 0 || fwLen == 0 || fwBuf == NULL) {
         PRINTF("Firmware File %s Load Error!", fwFile);
         mqtt_show_usage(mqttCtx);
@@ -341,9 +279,8 @@ int fwpush_test(MQTTCtx *mqttCtx)
         {
             PRINTF("MQTT Firmware Push Client: QoS %d, Use TLS %d",
                     mqttCtx->qos, mqttCtx->use_tls);
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_NET_INIT:
         {
@@ -363,9 +300,8 @@ int fwpush_test(MQTTCtx *mqttCtx)
             /* setup tx/rx buffers */
             mqttCtx->tx_buf = (byte*)WOLFMQTT_MALLOC(MAX_BUFFER_SIZE);
             mqttCtx->rx_buf = (byte*)WOLFMQTT_MALLOC(MAX_BUFFER_SIZE);
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_INIT:
         {
@@ -386,9 +322,8 @@ int fwpush_test(MQTTCtx *mqttCtx)
                 goto exit;
             }
             mqttCtx->client.ctx = mqttCtx;
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_TCP_CONN:
         {
@@ -425,9 +360,8 @@ int fwpush_test(MQTTCtx *mqttCtx)
             /* Optional authentication */
             mqttCtx->connect.username = mqttCtx->username;
             mqttCtx->connect.password = mqttCtx->password;
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_MQTT_CONN:
         {
@@ -491,9 +425,8 @@ int fwpush_test(MQTTCtx *mqttCtx)
                 PRINTF("Firmware message build failed! %d", rc);
                 exit(rc);
             }
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_PUB:
         {
@@ -516,9 +449,8 @@ int fwpush_test(MQTTCtx *mqttCtx)
             if (rc != MQTT_CODE_SUCCESS) {
                 goto disconn;
             }
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_DISCONNECT:
         {
@@ -532,9 +464,8 @@ int fwpush_test(MQTTCtx *mqttCtx)
             if (rc != MQTT_CODE_SUCCESS) {
                 goto disconn;
             }
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_NET_DISCONNECT:
         {
@@ -546,9 +477,8 @@ int fwpush_test(MQTTCtx *mqttCtx)
             }
             PRINTF("MQTT Socket Disconnect: %s (%d)",
                 MqttClient_ReturnCodeToString(rc), rc);
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_DONE:
         {
@@ -560,6 +490,7 @@ int fwpush_test(MQTTCtx *mqttCtx)
         case WMQ_SUB:
         case WMQ_WAIT_MSG:
         case WMQ_UNSUB:
+        case WMQ_PING:
         default:
             rc = MQTT_CODE_ERROR_STAT;
             goto exit;

@@ -1,6 +1,6 @@
 /* mqtt_client.c
  *
- * Copyright (C) 2006-2020 wolfSSL Inc.
+ * Copyright (C) 2006-2022 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -26,12 +26,6 @@
 
 #include "wolfmqtt/mqtt_client.h"
 
-/* Options */
-//#define WOLFMQTT_DEBUG_CLIENT
-#ifdef WOLFMQTT_NO_STDIO
-    #undef WOLFMQTT_DEBUG_CLIENT
-#endif
-
 /* Private functions */
 
 /* forward declarations */
@@ -40,23 +34,49 @@ static int MqttClient_Publish_ReadPayload(MqttClient* client,
 
 #ifdef WOLFMQTT_MULTITHREAD
 
-#ifdef __MACH__
+#ifdef WOLFMQTT_USER_THREADING
+
+    /* User will supply their own semaphore functions.
+     * int wm_SemInit(wm_Sem *s)
+     * int wm_SemFree(wm_Sem *s)
+     * int wm_SemLock(wm_Sem *s)
+     * int wm_SemUnlock(wm_Sem *s)
+     */
+
+#elif defined(__MACH__)
+
     /* Apple style dispatch semaphore */
     int wm_SemInit(wm_Sem *s){
-        *s = dispatch_semaphore_create(1);
+        /* dispatch_release() fails hard, with Trace/BPT trap signal, if the
+         * sem's internal count is less than the value passed in with
+         * dispatch_semaphore_create().  work around this by initing
+         * with 0, then incrementing it afterwards.
+         */
+        s->sem = dispatch_semaphore_create(0);
+        if (s->sem == NULL)
+            return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MEMORY);
+        if (dispatch_semaphore_signal(s->sem) < 0) {
+            dispatch_release(s->sem);
+            return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_SYSTEM);
+        }
+
         return 0;
     }
     int wm_SemFree(wm_Sem *s){
-        /* no free */
-        (void)s;
+        if ((s == NULL) ||
+            (s->sem == NULL))
+            return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
+        dispatch_release(s->sem);
+        s->sem = NULL;
         return 0;
     }
-    int wm_SemLock(wm_Sem *s){
-        dispatch_semaphore_wait(*s, DISPATCH_TIME_FOREVER);
+
+    int wm_SemLock(wm_Sem *s) {
+        dispatch_semaphore_wait(s->sem, DISPATCH_TIME_FOREVER);
         return 0;
     }
     int wm_SemUnlock(wm_Sem *s){
-        dispatch_semaphore_signal(*s);
+        dispatch_semaphore_signal(s->sem);
         return 0;
     }
 #elif defined(WOLFMQTT_POSIX_SEMAPHORES)
@@ -74,7 +94,7 @@ static int MqttClient_Publish_ReadPayload(MqttClient* client,
     }
     int wm_SemLock(wm_Sem *s){
         pthread_mutex_lock(&s->mutex);
-        if (s->lockCount > 0)
+        while (s->lockCount > 0)
             pthread_cond_wait(&s->cond, &s->mutex);
         s->lockCount++;
         pthread_mutex_unlock(&s->mutex);
@@ -110,7 +130,7 @@ static int MqttClient_Publish_ReadPayload(MqttClient* client,
 #elif defined(USE_WINDOWS_API)
     /* Windows semaphore object */
     int wm_SemInit(wm_Sem *s) {
-        *s = CreateSemaphore( NULL, 0, 1, NULL);
+        *s = CreateSemaphoreW( NULL, 1, 1, NULL);
         return 0;
     }
     int wm_SemFree(wm_Sem *s) {
@@ -119,7 +139,7 @@ static int MqttClient_Publish_ReadPayload(MqttClient* client,
         return 0;
     }
     int wm_SemLock(wm_Sem *s) {
-        WaitForSingleObject(*s, 0);
+        WaitForSingleObject(*s, INFINITE);
         return 0;
     }
     int wm_SemUnlock(wm_Sem *s) {
@@ -137,7 +157,7 @@ static int MqttClient_RespList_Add(MqttClient *client,
     MqttPendResp *tmpResp;
 
     if (client == NULL)
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
 
 #ifdef WOLFMQTT_DEBUG_CLIENT
     PRINTF("PendResp Add: %p, Type %s (%d), ID %d",
@@ -153,7 +173,7 @@ static int MqttClient_RespList_Add(MqttClient *client,
         #ifdef WOLFMQTT_DEBUG_CLIENT
             PRINTF("Pending Response already in list!");
         #endif
-            return MQTT_CODE_ERROR_BAD_ARG;
+            return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
         }
     }
 
@@ -217,7 +237,7 @@ static void MqttClient_RespList_Remove(MqttClient *client, MqttPendResp *rmResp)
     }
 #ifdef WOLFMQTT_DEBUG_CLIENT
     else {
-        PRINTF("\tPendResp Remove Failed");
+        PRINTF("\tPendResp not found");
     }
 #endif
 }
@@ -229,11 +249,16 @@ static int MqttClient_RespList_Find(MqttClient *client,
     MqttPendResp *tmpResp;
 
     if (client == NULL)
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
 
 #ifdef WOLFMQTT_DEBUG_CLIENT
-    PRINTF("PendResp Find: Type %s (%d), ID %d",
-        MqttPacket_TypeDesc(packet_type), packet_type, packet_id);
+    #ifdef WOLFMQTT_NONBLOCK
+    if (client->lastRc != MQTT_CODE_CONTINUE)
+    #endif
+    {
+        PRINTF("PendResp Find: Type %s (%d), ID %d",
+            MqttPacket_TypeDesc(packet_type), packet_type, packet_id);
+    }
 #endif
 
     if (retResp)
@@ -248,9 +273,15 @@ static int MqttClient_RespList_Find(MqttClient *client,
            (packet_id == tmpResp->packet_id))
         {
         #ifdef WOLFMQTT_DEBUG_CLIENT
-            PRINTF("PendResp Found: %p, Type %s (%d), ID %d",
+            #if defined(WOLFMQTT_NONBLOCK) && defined(WOLFMQTT_DEBUG_CLIENT)
+            if (client->lastRc != MQTT_CODE_CONTINUE)
+            #endif
+            {
+            PRINTF("PendResp Found: %p, Type %s (%d), ID %d, InProc %d, Done %d",
                 tmpResp, MqttPacket_TypeDesc(tmpResp->packet_type),
-                tmpResp->packet_type, tmpResp->packet_id);
+                tmpResp->packet_type, tmpResp->packet_id,
+                tmpResp->packetProcessing, tmpResp->packetDone);
+            }
         #endif
 
             if (retResp)
@@ -263,6 +294,38 @@ static int MqttClient_RespList_Find(MqttClient *client,
 }
 #endif /* WOLFMQTT_MULTITHREAD */
 
+#ifdef WOLFMQTT_V5
+static int Handle_Props(MqttClient* client, MqttProp* props, byte use_cb,
+                        byte free_props)
+{
+    int rc = MQTT_CODE_SUCCESS;
+
+    /* If no properties, just return */
+    if (props != NULL) {
+    #ifdef WOLFMQTT_PROPERTY_CB
+        /* Check for properties set by the server */
+        if ((use_cb == 1) && (client->property_cb != NULL)) {
+            /* capture error if returned */
+            int rc_err = client->property_cb(client, props,
+                    client->property_ctx);
+            if (rc_err < 0) {
+                rc = rc_err;
+            }
+        }
+    #else
+        (void)client;
+        (void)use_cb;
+    #endif
+        if (free_props) {
+            /* Free the properties */
+            MqttProps_Free(props);
+        }
+    }
+    return rc;
+}
+#endif
+
+
 /* Returns length decoded or error (as negative) */
 /*! \brief      Take a received MQTT packet and try and decode it
  *  \param      client       MQTT client context
@@ -272,26 +335,24 @@ static int MqttClient_RespList_Find(MqttClient *client,
  *  \param      ppacket_type Decoded packet type
  *  \param      ppacket_qos  Decoded QoS level
  *  \param      ppacket_id   Decoded packet id
+ *  \param      doProps      True: Call Handle_Props to free prop struct
 
  *  \return     Returns length decoded or error (as negative) MQTT_CODE_ERROR_*
                 (see enum MqttPacketResponseCodes)
  */
 static int MqttClient_DecodePacket(MqttClient* client, byte* rx_buf,
     word32 rx_len, void *packet_obj, MqttPacketType* ppacket_type,
-    MqttQoS* ppacket_qos, word16* ppacket_id)
+    MqttQoS* ppacket_qos, word16* ppacket_id, int doProps)
 {
     int rc = MQTT_CODE_SUCCESS;
     MqttPacket* header;
     MqttPacketType packet_type;
     MqttQoS packet_qos;
     word16 packet_id = 0;
-#ifdef WOLFMQTT_V5
-    MqttProp* props = NULL;
-#endif
 
     /* must have rx buffer with at least 2 byes for header */
     if (rx_buf == NULL || rx_len < MQTT_PACKET_HEADER_MIN_SIZE) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode header */
@@ -322,29 +383,46 @@ static int MqttClient_DecodePacket(MqttClient* client, byte* rx_buf,
         #endif
             rc = MqttDecode_ConnectAck(rx_buf, rx_len, p_connect_ack);
         #ifdef WOLFMQTT_V5
-            if (rc >= 0) {
-                props = p_connect_ack->props;
+            if (rc >= 0 && doProps) {
+                int tmp = Handle_Props(client, p_connect_ack->props,
+                                       (packet_obj != NULL), 1);
+                p_connect_ack->props = NULL;
+                if (tmp != MQTT_CODE_SUCCESS) {
+                    rc = tmp;
+                }
             }
         #endif
             break;
         }
         case MQTT_PACKET_TYPE_PUBLISH:
         {
-            MqttPublish publish, *p_publish = &publish;
+            MqttPublish publish, *p_publish;
             if (packet_obj) {
                 p_publish = (MqttPublish*)packet_obj;
+            #ifdef WOLFMQTT_V5
+                /* setting the protocol level will enable parsing of the
+                 * properties. The properties are allocated from a list,
+                 * so only parse if we are using a return packet object */
+                p_publish->protocol_level = client->protocol_level;
+            #endif
             }
             else {
+                p_publish = &publish;
                 XMEMSET(p_publish, 0, sizeof(MqttPublish));
             }
-        #ifdef WOLFMQTT_V5
-            p_publish->protocol_level = client->protocol_level;
-        #endif
             rc = MqttDecode_Publish(rx_buf, rx_len, p_publish);
             if (rc >= 0) {
                 packet_id = p_publish->packet_id;
             #ifdef WOLFMQTT_V5
-                props = p_publish->props;
+                if (doProps) {
+                    /* Do not free property list here. It will be freed
+                       after the message callback. */
+                    int tmp = Handle_Props(client, p_publish->props,
+                                           (packet_obj != NULL), 0);
+                    if (tmp != MQTT_CODE_SUCCESS) {
+                        rc = tmp;
+                    }
+                }
             #endif
             }
             break;
@@ -361,15 +439,23 @@ static int MqttClient_DecodePacket(MqttClient* client, byte* rx_buf,
             else {
                 XMEMSET(p_publish_resp, 0, sizeof(MqttPublishResp));
             }
+
         #ifdef WOLFMQTT_V5
-                p_publish_resp->protocol_level = client->protocol_level;
+            p_publish_resp->protocol_level = client->protocol_level;
         #endif
-                rc = MqttDecode_PublishResp(rx_buf, rx_len, packet_type,
+            rc = MqttDecode_PublishResp(rx_buf, rx_len, packet_type,
                 p_publish_resp);
             if (rc >= 0) {
                 packet_id = p_publish_resp->packet_id;
             #ifdef WOLFMQTT_V5
-                props = p_publish_resp->props;
+                if (doProps) {
+                    int tmp = Handle_Props(client, p_publish_resp->props,
+                                           (packet_obj != NULL), 1);
+                    p_publish_resp->props = NULL;
+                    if (tmp != MQTT_CODE_SUCCESS) {
+                        rc = tmp;
+                    }
+                }
             #endif
             }
             break;
@@ -390,7 +476,14 @@ static int MqttClient_DecodePacket(MqttClient* client, byte* rx_buf,
             if (rc >= 0) {
                 packet_id = p_subscribe_ack->packet_id;
             #ifdef WOLFMQTT_V5
-                props = p_subscribe_ack->props;
+                if (doProps) {
+                    int tmp = Handle_Props(client, p_subscribe_ack->props,
+                                           (packet_obj != NULL), 1);
+                    p_subscribe_ack->props = NULL;
+                    if (tmp != MQTT_CODE_SUCCESS) {
+                        rc = tmp;
+                    }
+                }
             #endif
             }
             break;
@@ -412,7 +505,14 @@ static int MqttClient_DecodePacket(MqttClient* client, byte* rx_buf,
             if (rc >= 0) {
                 packet_id = p_unsubscribe_ack->packet_id;
             #ifdef WOLFMQTT_V5
-                props = p_unsubscribe_ack->props;
+                if (doProps) {
+                    int tmp = Handle_Props(client, p_unsubscribe_ack->props,
+                                           (packet_obj != NULL), 1);
+                    p_unsubscribe_ack->props = NULL;
+                    if (tmp != MQTT_CODE_SUCCESS) {
+                        rc = tmp;
+                    }
+                }
             #endif
             }
             break;
@@ -440,11 +540,16 @@ static int MqttClient_DecodePacket(MqttClient* client, byte* rx_buf,
                 XMEMSET(p_auth, 0, sizeof(MqttAuth));
             }
             rc = MqttDecode_Auth(rx_buf, rx_len, p_auth);
-            if (rc >= 0) {
-                props = p_auth->props;
+            if (rc >= 0 && doProps) {
+                int tmp = Handle_Props(client, p_auth->props,
+                                       (packet_obj != NULL), 1);
+                p_auth->props = NULL;
+                if (tmp != MQTT_CODE_SUCCESS) {
+                    rc = tmp;
+                }
             }
         #else
-            rc = MQTT_CODE_ERROR_PACKET_TYPE;
+            rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
         #endif /* WOLFMQTT_V5 */
             break;
         }
@@ -459,11 +564,16 @@ static int MqttClient_DecodePacket(MqttClient* client, byte* rx_buf,
                 XMEMSET(p_disc, 0, sizeof(MqttDisconnect));
             }
             rc = MqttDecode_Disconnect(rx_buf, rx_len, p_disc);
-            if (rc >= 0) {
-                props = p_disc->props;
+            if (rc >= 0 && doProps) {
+                int tmp = Handle_Props(client, p_disc->props,
+                                       (packet_obj != NULL), 1);
+                p_disc->props = NULL;
+                if (tmp != MQTT_CODE_SUCCESS) {
+                    rc = tmp;
+                }
             }
         #else
-            rc = MQTT_CODE_ERROR_PACKET_TYPE;
+            rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
         #endif /* WOLFMQTT_V5 */
             break;
         }
@@ -475,7 +585,7 @@ static int MqttClient_DecodePacket(MqttClient* client, byte* rx_buf,
         case MQTT_PACKET_TYPE_RESERVED:
         default:
             /* these type are only encoded by client */
-            rc = MQTT_CODE_ERROR_PACKET_TYPE;
+            rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
             break;
         } /* switch (packet_type) */
     }
@@ -484,46 +594,33 @@ static int MqttClient_DecodePacket(MqttClient* client, byte* rx_buf,
         *ppacket_id = packet_id;
     }
 
-#ifdef WOLFMQTT_V5
-    if (props) {
-    #ifdef WOLFMQTT_PROPERTY_CB
-        /* Check for properties set by the server */
-        if (packet_obj && client->property_cb) {
-            /* capture error if returned */
-            int rc_err = client->property_cb(client, props,
-                    client->property_ctx);
-            if (rc_err < 0) {
-                rc = rc_err;
-            }
-        }
-    #endif
-        /* Free the properties */
-        MqttProps_Free(props);
-    }
-#endif
-
     (void)client;
+    (void)doProps;
 
 #ifdef WOLFMQTT_DEBUG_CLIENT
     PRINTF("MqttClient_DecodePacket: Rc %d, Len %d, Type %s (%d), ID %d,"
-            " QoS %d",
+            " QoS %d, doProps %d",
         rc, rx_len, MqttPacket_TypeDesc(packet_type), packet_type, packet_id,
-        packet_qos);
+        packet_qos, doProps);
 #endif
 
     return rc;
 }
 
 static int MqttClient_HandlePacket(MqttClient* client,
-    MqttPacketType packet_type, void *packet_obj, int timeout_ms)
+    MqttPacketType packet_type, void *packet_obj, MqttPublishResp* resp,
+    int timeout_ms)
 {
     int rc = MQTT_CODE_SUCCESS;
     MqttQoS packet_qos = MQTT_QOS_0;
     word16 packet_id = 0;
 
     if (client == NULL || packet_obj == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
+
+    /* make sure the response defaults to no ACK */
+    resp->packet_type = MQTT_PACKET_TYPE_RESERVED;
 
     switch (packet_type)
     {
@@ -531,28 +628,38 @@ static int MqttClient_HandlePacket(MqttClient* client,
         {
             rc = MqttClient_DecodePacket(client, client->rx_buf,
                 client->packet.buf_len, packet_obj, &packet_type, &packet_qos,
-                &packet_id);
+                &packet_id, 1);
             break;
         }
         case MQTT_PACKET_TYPE_PUBLISH:
         {
-            MqttPublish *publish = (MqttPublish*)packet_obj;
-            MqttPacketType resp_type;
-
-            if (publish->stat == MQTT_MSG_BEGIN ||
-                publish->stat == MQTT_MSG_READ) {
+            MqttPublish* publish = (MqttPublish*)packet_obj;
+            if (publish->stat.read != MQTT_MSG_PAYLOAD2) {
                 rc = MqttClient_DecodePacket(client, client->rx_buf,
                     client->packet.buf_len, packet_obj, &packet_type,
-                    &packet_qos, &packet_id);
+                    &packet_qos, &packet_id, 1);
                 if (rc <= 0) {
                     return rc;
                 }
+            }
+            else {
+                /* packet ID and QoS were already established */
+                packet_id =  publish->packet_id;
+                packet_qos = publish->qos;
             }
 
             rc = MqttClient_Publish_ReadPayload(client, publish, timeout_ms);
             if (rc < 0) {
                 break;
             }
+            /* Note: Getting here means the Publish Read is done */
+            publish->stat.read = MQTT_MSG_BEGIN; /* reset state */
+
+        #ifdef WOLFMQTT_V5
+            /* Free the properties */
+            MqttProps_Free(publish->props);
+            publish->props = NULL;
+        #endif
 
             /* Handle QoS */
             if (packet_qos == MQTT_QOS_0) {
@@ -560,44 +667,15 @@ static int MqttClient_HandlePacket(MqttClient* client,
                 break;
             }
 
-            /* Determine packet type to write */
-            resp_type = (packet_qos == MQTT_QOS_1) ?
+        #ifdef WOLFMQTT_V5
+            /* Copy response code in case changed by callback */
+            resp->reason_code = publish->resp.reason_code;
+        #endif
+            /* Populate information needed for ack */
+            resp->packet_type = (packet_qos == MQTT_QOS_1) ?
                 MQTT_PACKET_TYPE_PUBLISH_ACK :
                 MQTT_PACKET_TYPE_PUBLISH_REC;
-            publish->resp.packet_id = packet_id;
-
-        #ifdef WOLFMQTT_MULTITHREAD
-            /* Lock send socket mutex */
-            rc = wm_SemLock(&client->lockSend);
-            if (rc != 0) {
-                return rc;
-            }
-        #endif
-
-            /* Encode publish response */
-            rc = MqttEncode_PublishResp(client->tx_buf, client->tx_buf_len,
-                resp_type, &publish->resp);
-        #ifdef WOLFMQTT_DEBUG_CLIENT
-            PRINTF("MqttClient_EncodePacket: Len %d, Type %s (%d), ID %d,"
-                    " QoS %d",
-                rc, MqttPacket_TypeDesc(resp_type), resp_type, packet_id,
-                packet_qos);
-        #endif
-            if (rc <= 0) {
-            #ifdef WOLFMQTT_MULTITHREAD
-                wm_SemUnlock(&client->lockSend);
-            #endif
-                return rc;
-            }
-            client->packet.buf_len = rc;
-
-            /* Send publish response packet */
-            rc = MqttPacket_Write(client, client->tx_buf,
-                client->packet.buf_len);
-
-        #ifdef WOLFMQTT_MULTITHREAD
-            wm_SemUnlock(&client->lockSend);
-        #endif
+            resp->packet_id = packet_id;
             break;
         }
         case MQTT_PACKET_TYPE_PUBLISH_ACK:
@@ -605,77 +683,54 @@ static int MqttClient_HandlePacket(MqttClient* client,
         case MQTT_PACKET_TYPE_PUBLISH_REL:
         case MQTT_PACKET_TYPE_PUBLISH_COMP:
         {
-            MqttPublishResp publish_resp;
-            XMEMSET(&publish_resp, 0, sizeof(publish_resp));
-
+        #if defined(WOLFMQTT_V5) && defined(WOLFMQTT_DEBUG_CLIENT)
+            MqttPublishResp* publish_resp = (MqttPublishResp*)packet_obj;
+        #endif
             rc = MqttClient_DecodePacket(client, client->rx_buf,
-                client->packet.buf_len, &publish_resp, &packet_type,
-                &packet_qos, &packet_id);
+                client->packet.buf_len, packet_obj, &packet_type,
+                &packet_qos, &packet_id, 1);
             if (rc <= 0) {
                 return rc;
             }
 
-            /* If publish Received or Release QoS then proceed */
+        #if defined(WOLFMQTT_V5) && defined(WOLFMQTT_DEBUG_CLIENT)
+            PRINTF("\tPublish response: reason code %d, Type %s (%d),"
+                    " ID %d, QoS %d",
+                    publish_resp->reason_code,
+                    MqttPacket_TypeDesc(packet_type),
+                    packet_type, packet_id, packet_qos);
+        #endif
+
+            /* Only ACK publish Received or Release QoS levels */
             if (packet_type != MQTT_PACKET_TYPE_PUBLISH_REC &&
                 packet_type != MQTT_PACKET_TYPE_PUBLISH_REL) {
                 break;
             }
 
-        #ifdef WOLFMQTT_MULTITHREAD
-            /* Lock send socket mutex */
-            rc = wm_SemLock(&client->lockSend);
-            if (rc != 0) {
-                return rc;
-            }
-        #endif
-
-            /* Encode publish response */
-            publish_resp.packet_id = packet_id;
-            packet_type = (MqttPacketType)((int)packet_type+1); /* next ack */
-            rc = MqttEncode_PublishResp(client->tx_buf, client->tx_buf_len,
-                packet_type, &publish_resp);
-        #ifdef WOLFMQTT_DEBUG_CLIENT
-            PRINTF("MqttClient_EncodePacket: Len %d, Type %s (%d), ID %d,"
-                    " QoS %d",
-                rc, MqttPacket_TypeDesc(packet_type), packet_type, packet_id,
-                packet_qos);
-        #endif
-            if (rc <= 0) {
-            #ifdef WOLFMQTT_MULTITHREAD
-                wm_SemUnlock(&client->lockSend);
-            #endif
-                return rc;
-            }
-            client->packet.buf_len = rc;
-
-            /* Send publish response packet */
-            rc = MqttPacket_Write(client, client->tx_buf,
-                client->packet.buf_len);
-
-        #ifdef WOLFMQTT_MULTITHREAD
-            wm_SemUnlock(&client->lockSend);
-        #endif
+            /* Populate information needed for ack */
+            resp->packet_type = packet_type+1; /* next ack */
+            resp->packet_id = packet_id;
             break;
         }
         case MQTT_PACKET_TYPE_SUBSCRIBE_ACK:
         {
             rc = MqttClient_DecodePacket(client, client->rx_buf,
                 client->packet.buf_len, packet_obj, &packet_type, &packet_qos,
-                &packet_id);
+                &packet_id, 1);
             break;
         }
         case MQTT_PACKET_TYPE_UNSUBSCRIBE_ACK:
         {
             rc = MqttClient_DecodePacket(client, client->rx_buf,
                 client->packet.buf_len, packet_obj, &packet_type, &packet_qos,
-                &packet_id);
+                &packet_id, 1);
             break;
         }
         case MQTT_PACKET_TYPE_PING_RESP:
         {
             rc = MqttClient_DecodePacket(client, client->rx_buf,
                 client->packet.buf_len, packet_obj, &packet_type, &packet_qos,
-                &packet_id);
+                &packet_id, 1);
             break;
         }
         case MQTT_PACKET_TYPE_AUTH:
@@ -683,9 +738,9 @@ static int MqttClient_HandlePacket(MqttClient* client,
         #ifdef WOLFMQTT_V5
             rc = MqttClient_DecodePacket(client, client->rx_buf,
                 client->packet.buf_len, packet_obj, &packet_type, &packet_qos,
-                &packet_id);
+                &packet_id, 1);
         #else
-            rc = MQTT_CODE_ERROR_PACKET_TYPE;
+            rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
         #endif
             break;
         }
@@ -695,9 +750,9 @@ static int MqttClient_HandlePacket(MqttClient* client,
         #ifdef WOLFMQTT_V5
             rc = MqttClient_DecodePacket(client, client->rx_buf,
                 client->packet.buf_len, packet_obj, &packet_type, &packet_qos,
-                &packet_id);
+                &packet_id, 1);
         #else
-            rc = MQTT_CODE_ERROR_PACKET_TYPE;
+            rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
         #endif
             break;
         }
@@ -710,7 +765,7 @@ static int MqttClient_HandlePacket(MqttClient* client,
         default:
             /* these types are only sent from client and should not be sent
              * by broker */
-            rc = MQTT_CODE_ERROR_PACKET_TYPE;
+            rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
             break;
     } /* switch (packet_type) */
 
@@ -725,21 +780,131 @@ static int MqttClient_HandlePacket(MqttClient* client,
     return rc;
 }
 
+static inline int MqttIsPubRespPacket(int packet_type)
+{
+    return (packet_type == MQTT_PACKET_TYPE_PUBLISH_ACK /* Acknowledgment */ ||
+            packet_type == MQTT_PACKET_TYPE_PUBLISH_REC /* Received */ ||
+            packet_type == MQTT_PACKET_TYPE_PUBLISH_REL /* Release */ ||
+            packet_type == MQTT_PACKET_TYPE_PUBLISH_COMP /* Complete */);
+}
+
+#ifdef WOLFMQTT_MULTITHREAD
+/* this function will return:
+ * MQTT_CODE_CONTINUE indicating found, but not marked done
+ * MQTT_CODE_ERROR_NOT_FOUND: Not found
+ * Any other response is from the the packet_ret
+ */
+static int MqttClient_CheckPendResp(MqttClient *client, byte wait_type,
+    word16 wait_packet_id)
+{
+    int rc;
+    MqttPendResp *pendResp = NULL;
+
+    /* Check to see if packet type and id have already completed */
+    rc = wm_SemLock(&client->lockClient);
+    if (rc == 0) {
+        if (MqttClient_RespList_Find(client, (MqttPacketType)wait_type,
+            wait_packet_id, &pendResp))
+        {
+            if ((pendResp != NULL) && (pendResp->packetDone)) {
+                /* pending response is already done, so return */
+                rc = pendResp->packet_ret;
+            #ifdef WOLFMQTT_DEBUG_CLIENT
+                PRINTF("PendResp Check Done %p: Rc %d", pendResp, rc);
+            #endif
+                MqttClient_RespList_Remove(client, pendResp);
+            }
+            else {
+                /* item not done */
+                rc = MQTT_CODE_CONTINUE;
+            }
+        }
+        else {
+            /* item not found */
+            rc = MQTT_CODE_ERROR_NOT_FOUND;
+        }
+        wm_SemUnlock(&client->lockClient);
+    }
+    return rc;
+}
+#endif /* WOLFMQTT_MULTITHREAD */
+
+/* Helper for clearing the contents of an object buffer based on packet type */
+static void MqttClient_PacketReset(MqttPacketType packet_type, void* packet_obj)
+{
+    size_t objSz = 0;
+    size_t offset = sizeof(MqttMsgStat);
+#ifdef WOLFMQTT_MULTITHREAD
+    offset += sizeof(MqttPendResp);
+#endif
+    switch (packet_type) {
+        case MQTT_PACKET_TYPE_CONNECT:
+            objSz = sizeof(MqttConnect);
+            break;
+        case MQTT_PACKET_TYPE_CONNECT_ACK:
+            objSz = sizeof(MqttConnectAck);
+            break;
+        case MQTT_PACKET_TYPE_PUBLISH:
+            objSz = sizeof(MqttPublish);
+            break;
+        case MQTT_PACKET_TYPE_PUBLISH_ACK:
+        case MQTT_PACKET_TYPE_PUBLISH_REC:
+        case MQTT_PACKET_TYPE_PUBLISH_REL:
+        case MQTT_PACKET_TYPE_PUBLISH_COMP:
+            objSz = sizeof(MqttPublishResp);
+            break;
+        case MQTT_PACKET_TYPE_SUBSCRIBE:
+            objSz = sizeof(MqttSubscribe);
+            break;
+        case MQTT_PACKET_TYPE_SUBSCRIBE_ACK:
+            objSz = sizeof(MqttSubscribeAck);
+            break;
+        case MQTT_PACKET_TYPE_UNSUBSCRIBE:
+            objSz = sizeof(MqttUnsubscribe);
+            break;
+        case MQTT_PACKET_TYPE_UNSUBSCRIBE_ACK:
+            objSz = sizeof(MqttUnsubscribeAck);
+            break;
+        case MQTT_PACKET_TYPE_PING_REQ:
+        case MQTT_PACKET_TYPE_PING_RESP:
+            objSz = sizeof(MqttPing);
+            break;
+        case MQTT_PACKET_TYPE_AUTH:
+        #ifdef WOLFMQTT_V5
+            objSz = sizeof(MqttAuth);
+        #endif
+            break;
+        case MQTT_PACKET_TYPE_DISCONNECT:
+        #ifdef WOLFMQTT_V5
+            objSz = sizeof(MqttDisconnect);
+        #endif
+            break;
+        case MQTT_PACKET_TYPE_ANY:
+        case MQTT_PACKET_TYPE_RESERVED:
+        default:
+            break;
+    } /* switch (packet_type) */
+    if (objSz > offset) {
+        XMEMSET((byte*)packet_obj + offset, 0, objSz - offset);
+    }
+}
+
 static int MqttClient_WaitType(MqttClient *client, void *packet_obj,
     byte wait_type, word16 wait_packet_id, int timeout_ms)
 {
-    int rc;
-    word16 packet_id;
+    int rc = MQTT_CODE_SUCCESS;
+    word16         packet_id;
     MqttPacketType packet_type;
+    MqttQoS        packet_qos = MQTT_QOS_0;
 #ifdef WOLFMQTT_MULTITHREAD
     MqttPendResp *pendResp;
-    int readLocked;
 #endif
     MqttMsgStat* mms_stat;
     int waitMatchFound;
+    void* use_packet_obj = NULL;
 
     if (client == NULL || packet_obj == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* all packet type structures must have MqttMsgStat at top */
@@ -752,121 +917,132 @@ wait_again:
     packet_type = MQTT_PACKET_TYPE_RESERVED;
 #ifdef WOLFMQTT_MULTITHREAD
     pendResp = NULL;
-    readLocked = 0;
 #endif
     waitMatchFound = 0;
 
 #ifdef WOLFMQTT_DEBUG_CLIENT
-    PRINTF("MqttClient_WaitType: Type %s (%d), ID %d",
-        MqttPacket_TypeDesc((MqttPacketType)wait_type),
-            wait_type, wait_packet_id);
+    #ifdef WOLFMQTT_NONBLOCK
+    if (client->lastRc != MQTT_CODE_CONTINUE)
+    #endif
+    {
+        PRINTF("MqttClient_WaitType: Type %s (%d), ID %d, State %d-%d",
+            MqttPacket_TypeDesc((MqttPacketType)wait_type),
+                wait_type, wait_packet_id, mms_stat->read, mms_stat->write);
+    }
 #endif
 
-    switch ((int)*mms_stat)
+    switch (mms_stat->read)
     {
         case MQTT_MSG_BEGIN:
         {
-            /* reset the packet state */
-            client->packet.stat = MQTT_PK_BEGIN;
-            client->read.pos = 0;
-
-            FALL_THROUGH;
-        }
-    #ifdef WOLFMQTT_V5
-        case MQTT_MSG_AUTH:
-    #endif
-        case MQTT_MSG_WAIT:
-        {
         #ifdef WOLFMQTT_MULTITHREAD
+            /* Check to see if packet type and id have already completed */
+            rc = MqttClient_CheckPendResp(client, wait_type, wait_packet_id);
+            if (rc != MQTT_CODE_ERROR_NOT_FOUND
+                && rc != MQTT_CODE_CONTINUE
+            ) {
+                return rc;
+            }
+
             /* Lock recv socket mutex */
             rc = wm_SemLock(&client->lockRecv);
             if (rc != 0) {
-                PRINTF("!!!!LOCK ERROR!!!!\n");
+                PRINTF("MqttClient_WaitType: recv lock error!");
                 return rc;
             }
-            readLocked = 1;
+            mms_stat->isReadLocked = 1;
+            MQTT_TRACE_MSG("lockRecv");
+        #endif
 
-            /* Check to see if packet type and id have already completed */
-            pendResp = NULL;
-            rc = wm_SemLock(&client->lockClient);
-            if (rc == 0) {
-                if (MqttClient_RespList_Find(client, (MqttPacketType)wait_type, 
-                        wait_packet_id, &pendResp)) {
-                    if (pendResp->packetDone) {
-                        /* pending response is already done, so return */
-                        rc = pendResp->packet_ret;
-                    #ifdef WOLFMQTT_DEBUG_CLIENT
-                        PRINTF("PendResp already Done %p: Rc %d", pendResp, rc);
-                    #endif
-                        MqttClient_RespList_Remove(client, pendResp);
-                        wm_SemUnlock(&client->lockClient);
-                        wm_SemUnlock(&client->lockRecv);
-                        return rc;
-                    }
-                }
-                wm_SemUnlock(&client->lockClient);
-            }
-            else {
-                wm_SemUnlock(&client->lockRecv);
-                return rc;
-            }
-        #endif /* WOLFMQTT_MULTITHREAD */
+            /* reset the packet state used by MqttPacket_Read */
+            client->packet.stat = MQTT_PK_BEGIN;
 
-            *mms_stat = MQTT_MSG_WAIT;
+            mms_stat->read = MQTT_MSG_WAIT;
+        }
+        FALL_THROUGH;
 
+        case MQTT_MSG_WAIT:
+        case MQTT_MSG_HEADER:
+        {
             /* Wait for packet */
             rc = MqttPacket_Read(client, client->rx_buf, client->rx_buf_len,
                     timeout_ms);
             /* handle failure */
             if (rc <= 0) {
+            #ifdef WOLFMQTT_NONBLOCK
+                if (rc == MQTT_CODE_CONTINUE &&
+                                          client->packet.stat > MQTT_PK_BEGIN) {
+                    /* advance state, since we received some data */
+                    mms_stat->read = MQTT_MSG_HEADER;
+                }
+            #endif
                 break;
             }
+
+            /* advance state, since we received some data */
+            mms_stat->read = MQTT_MSG_HEADER;
+
             /* capture length read */
             client->packet.buf_len = rc;
 
-            /* Decode Packet - get type and id */
+            /* Decode Packet - get type, qos and id */
             rc = MqttClient_DecodePacket(client, client->rx_buf,
-                client->packet.buf_len, NULL, &packet_type, NULL, &packet_id);
+                client->packet.buf_len, NULL, &packet_type, &packet_qos,
+                &packet_id, 1);
             if (rc < 0) {
                 break;
             }
+
+            MqttClient_PacketReset(packet_type, &client->msg);
 
         #ifdef WOLFMQTT_DEBUG_CLIENT
             PRINTF("Read Packet: Len %d, Type %d, ID %d",
                 client->packet.buf_len, packet_type, packet_id);
         #endif
 
-            *mms_stat = MQTT_MSG_READ;
-
-            FALL_THROUGH;
+            mms_stat->read = MQTT_MSG_PAYLOAD;
         }
+        FALL_THROUGH;
 
-        case MQTT_MSG_READ:
-        case MQTT_MSG_READ_PAYLOAD:
+        case MQTT_MSG_PAYLOAD:
+        case MQTT_MSG_PAYLOAD2:
         {
+            MqttPublishResp resp;
             MqttPacketType use_packet_type;
-            void* use_packet_obj;
-
-        #ifdef WOLFMQTT_MULTITHREAD
-            readLocked = 1; /* if in this state read is locked */
-        #endif
-
-            /* read payload state only happens for publish messages */
-            if (*mms_stat == MQTT_MSG_READ_PAYLOAD) {
-                packet_type = MQTT_PACKET_TYPE_PUBLISH;
-            }
 
             /* Determine if we received data for this request */
             if ((wait_type == MQTT_PACKET_TYPE_ANY ||
-                 wait_type == packet_type) &&
-               (wait_packet_id == 0 || wait_packet_id == packet_id))
+                 wait_type == packet_type ||
+                 (MqttIsPubRespPacket(packet_type) &&
+                  MqttIsPubRespPacket(wait_type))) &&
+                (wait_packet_id == 0 || wait_packet_id == packet_id))
             {
                 use_packet_obj = packet_obj;
-                waitMatchFound = 1;
+            #ifdef WOLFMQTT_DEBUG_CLIENT
+                PRINTF("Using INCOMING packet_obj %p", use_packet_obj);
+            #endif
+                if (packet_type == wait_type || wait_type == MQTT_PACKET_TYPE_ANY) {
+                    /* Only stop waiting when matched or waiting for "any" */
+                    waitMatchFound = 1;
+                }
             }
             else {
+            #ifdef WOLFMQTT_MULTITHREAD
+                rc = wm_SemLock(&client->lockClient);
+                if (rc != 0) {
+                    break; /* error */
+                }
+            #endif
+
                 /* use generic packet object */
                 use_packet_obj = &client->msg;
+            #ifdef WOLFMQTT_DEBUG_CLIENT
+                PRINTF("Using SHARED packet_obj %p", use_packet_obj);
+            #endif
+
+            #ifdef WOLFMQTT_MULTITHREAD
+                wm_SemUnlock(&client->lockClient);
+            #endif
             }
             use_packet_type = packet_type;
 
@@ -879,10 +1055,12 @@ wait_again:
                                                                &pendResp)) {
                     /* we found packet match this incoming read packet */
                     pendResp->packetProcessing = 1;
-                    use_packet_obj = pendResp->packet_obj;
-                    use_packet_type = pendResp->packet_type;
-                    /* req from another thread... not a match */
-                    waitMatchFound = 0;
+                    if (pendResp->packet_obj != packet_obj) {
+                        use_packet_obj = pendResp->packet_obj;
+                        use_packet_type = pendResp->packet_type;
+                        /* req from another thread... not a match */
+                        waitMatchFound = 0;
+                    }
                 }
                 wm_SemUnlock(&client->lockClient);
             }
@@ -891,15 +1069,37 @@ wait_again:
             }
         #endif /* WOLFMQTT_MULTITHREAD */
 
+            /* for payload state packet type is always publish */
+            if (use_packet_type == MQTT_PACKET_TYPE_RESERVED &&
+                    (mms_stat->read == MQTT_MSG_PAYLOAD ||
+                     mms_stat->read == MQTT_MSG_PAYLOAD2))
+            {
+                use_packet_type = MQTT_PACKET_TYPE_PUBLISH;
+            }
+            /* cache publish packet id and qos for MqttClient_HandlePacket payload */
+            if (use_packet_type == MQTT_PACKET_TYPE_PUBLISH &&
+                  mms_stat->read == MQTT_MSG_PAYLOAD && use_packet_obj != NULL)
+            {
+                MqttObject* obj = (MqttObject*)use_packet_obj;
+                obj->publish.qos = packet_qos;
+                obj->publish.packet_id = packet_id;
+            }
+
             /* Perform packet handling for publish callback and QoS */
+            XMEMSET(&resp, 0, sizeof(resp));
             rc = MqttClient_HandlePacket(client, use_packet_type,
-                use_packet_obj, timeout_ms);
+                use_packet_obj, &resp, timeout_ms);
+
+            /* if using the shared packet object, make sure the original
+             * state is correct for publish payload 2 (continued) */
+            if (use_packet_obj != mms_stat &&
+                    ((MqttMsgStat*)use_packet_obj)->read == MQTT_MSG_PAYLOAD2) {
+                mms_stat->read = MQTT_MSG_PAYLOAD2;
+            }
 
         #ifdef WOLFMQTT_NONBLOCK
             if (rc == MQTT_CODE_CONTINUE) {
-                /* we have received some data, so keep the recv
-                    mutex lock active and return */
-                return rc;
+                break;
             }
         #endif
 
@@ -922,45 +1122,188 @@ wait_again:
                 }
             }
         #endif /* WOLFMQTT_MULTITHREAD */
+
+            /* are we sending ACK or done with message? */
+            if (MqttIsPubRespPacket(resp.packet_type)) {
+                mms_stat->read = MQTT_MSG_ACK;
+            }
+            else {
+                mms_stat->read = MQTT_MSG_BEGIN;
+            }
+
+        #ifdef WOLFMQTT_MULTITHREAD
+            /* release read lock, done reading */
+            if (mms_stat->isReadLocked) {
+                mms_stat->isReadLocked = 0;
+                MQTT_TRACE_MSG("unlockRecv");
+                wm_SemUnlock(&client->lockRecv);
+            }
+        #endif
+
+            /* if error, leave */
+            if (rc != MQTT_CODE_SUCCESS) {
+                break;
+            }
+
+            /* if not sending an ACK, we are done */
+            if (!MqttIsPubRespPacket(resp.packet_type)) {
+                break;
+            }
+
+        #ifdef WOLFMQTT_MULTITHREAD
+            /* Lock send socket mutex */
+            rc = wm_SemLock(&client->lockSend);
+            if (rc != 0) break;
+            mms_stat->isWriteLocked = 1;
+            MQTT_TRACE_MSG("lockSend");
+        #endif
+
+            /* setup ACK in shared context */
+            XMEMCPY(&client->packetAck, &resp, sizeof(MqttPublishResp));
+        #ifdef WOLFMQTT_V5
+            client->packetAck.protocol_level = client->protocol_level;
+        #endif
+
+            mms_stat->write = MQTT_MSG_ACK;
             break;
         }
 
-        case MQTT_MSG_WRITE:
-        case MQTT_MSG_WRITE_PAYLOAD:
+        case MQTT_MSG_ACK:
+            /* go to write section below */
+            break;
+
+        case MQTT_MSG_AUTH:
         default:
         {
         #ifdef WOLFMQTT_DEBUG_CLIENT
-            PRINTF("MqttClient_WaitType: Invalid state %d!", *mms_stat);
+            PRINTF("MqttClient_WaitType: Invalid read state %d!",
+                mms_stat->read);
         #endif
             rc = MQTT_CODE_ERROR_STAT;
             break;
         }
-    } /* switch (*mms_stat) */
+    } /* switch (mms_stat->read) */
+
+    switch (mms_stat->write)
+    {
+        case MQTT_MSG_BEGIN:
+        case MQTT_MSG_WAIT:
+            /* wait for read to set ack */
+            break;
+
+        case MQTT_MSG_ACK:
+        {
+        #ifdef WOLFMQTT_MULTITHREAD
+            if (!mms_stat->isWriteLocked) {
+                rc = wm_SemLock(&client->lockSend);
+                if (rc != 0) break;
+                mms_stat->isWriteLocked = 1;
+                MQTT_TRACE_MSG("lockSend");
+            }
+        #endif
+
+            /* send ack */
+            rc = MqttEncode_PublishResp(client->tx_buf, client->tx_buf_len,
+                client->packetAck.packet_type, &client->packetAck);
+        #ifdef WOLFMQTT_DEBUG_CLIENT
+            PRINTF("MqttEncode_PublishResp: Len %d, Type %s (%d), ID %d",
+                rc, MqttPacket_TypeDesc(client->packetAck.packet_type),
+                    client->packetAck.packet_type, client->packetAck.packet_id);
+        #endif
+            if (rc > 0) {
+                client->write.len = rc;
+
+                /* Send publish response packet */
+                rc = MqttPacket_Write(client, client->tx_buf,
+                    client->write.len);
+            #ifdef WOLFMQTT_NONBLOCK
+                if (rc == MQTT_CODE_CONTINUE)
+                    break;
+            #endif
+                if (rc == client->write.len) {
+                    rc = 0; /* success */
+                }
+            }
+
+            mms_stat->write = MQTT_MSG_BEGIN;
+        #ifdef WOLFMQTT_MULTITHREAD
+            MQTT_TRACE_MSG("unlockSend");
+            mms_stat->isWriteLocked = 0;
+            wm_SemUnlock(&client->lockSend);
+        #endif
+            break;
+        }
+
+        case MQTT_MSG_AUTH:
+        case MQTT_MSG_HEADER:
+        case MQTT_MSG_PAYLOAD:
+        case MQTT_MSG_PAYLOAD2:
+        default:
+        #ifdef WOLFMQTT_DEBUG_CLIENT
+            PRINTF("MqttClient_WaitType: Invalid write state %d!",
+                mms_stat->write);
+        #endif
+            rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_STAT);
+            break;
+    } /* switch (mms_stat->write) */
+
+#ifdef WOLFMQTT_DEBUG_CLIENT
+    if (rc != MQTT_CODE_CONTINUE) {
+        PRINTF("MqttClient_WaitType: rc %d, state %d-%d",
+            rc, mms_stat->read, mms_stat->write);
+    }
+#endif
+
+    /* no data read or ack done, then reset state */
+    if (mms_stat->read == MQTT_MSG_WAIT || mms_stat->read == MQTT_MSG_ACK) {
+        mms_stat->read = MQTT_MSG_BEGIN;
+    }
+
+#ifdef WOLFMQTT_NONBLOCK
+    /* if nonblocking and some data has been read, do not release read lock */
+    if (rc == MQTT_CODE_CONTINUE && mms_stat->read > MQTT_MSG_WAIT) {
+        return rc;
+    }
+#endif
 
 #ifdef WOLFMQTT_MULTITHREAD
-    if (readLocked) {
+    if (mms_stat->isReadLocked) {
+        mms_stat->isReadLocked = 0;
+        MQTT_TRACE_MSG("unlockRecv");
         wm_SemUnlock(&client->lockRecv);
     }
 #endif
 
 #ifdef WOLFMQTT_NONBLOCK
-    if (rc != MQTT_CODE_CONTINUE)
-#endif
-    {
-        /* reset state */
-        *mms_stat = MQTT_MSG_BEGIN;
+    #ifdef WOLFMQTT_DEBUG_CLIENT
+    client->lastRc = rc;
+    #endif
+    if (rc == MQTT_CODE_CONTINUE) {
+        return rc;
     }
+#endif
 
     if (rc < 0) {
     #ifdef WOLFMQTT_DEBUG_CLIENT
-        PRINTF("MqttClient_WaitType: Failure: %s (%d)",
-            MqttClient_ReturnCodeToString(rc), rc);
+        if (rc != MQTT_CODE_CONTINUE) {
+            PRINTF("MqttClient_WaitType: Failure: %s (%d)",
+                MqttClient_ReturnCodeToString(rc), rc);
+        }
     #endif
         return rc;
     }
 
     if (!waitMatchFound) {
         /* if we get here, then the we are still waiting for a packet */
+        mms_stat->read = MQTT_MSG_BEGIN;
+        MQTT_TRACE_MSG("Wait Again");
+    #ifdef WOLFMQTT_NONBLOCK
+        /* for non-blocking return with code continue instead of waiting again
+         * if called with packet type and id of 'any' */
+        if (wait_type == MQTT_PACKET_TYPE_ANY && wait_packet_id == 0) {
+            return MQTT_CODE_CONTINUE;
+        }
+    #endif
         goto wait_again;
     }
 
@@ -981,7 +1324,7 @@ int MqttClient_Init(MqttClient *client, MqttNet* net,
     if (client == NULL ||
         tx_buf == NULL || tx_buf_len <= 0 ||
         rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Initialize the client structure to zero */
@@ -1045,7 +1388,7 @@ int MqttClient_SetDisconnectCallback(MqttClient *client,
         MqttDisconnectCb discCb, void* ctx)
 {
     if (client == NULL)
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
 
     client->disconnect_cb = discCb;
     client->disconnect_ctx = ctx;
@@ -1059,7 +1402,7 @@ int MqttClient_SetPropertyCallback(MqttClient *client, MqttPropertyCb propCb,
     void* ctx)
 {
     if (client == NULL)
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
 
     client->property_cb = propCb;
     client->property_ctx = ctx;
@@ -1070,14 +1413,14 @@ int MqttClient_SetPropertyCallback(MqttClient *client, MqttPropertyCb propCb,
 
 int MqttClient_Connect(MqttClient *client, MqttConnect *mc_connect)
 {
-    int rc, len = 0;
+    int rc;
 
     /* Validate required arguments */
     if (client == NULL || mc_connect == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
-    if (mc_connect->stat == MQTT_MSG_BEGIN) {
+    if (mc_connect->stat.write == MQTT_MSG_BEGIN) {
     #ifdef WOLFMQTT_MULTITHREAD
         /* Lock send socket mutex */
         rc = wm_SemLock(&client->lockSend);
@@ -1104,7 +1447,7 @@ int MqttClient_Connect(MqttClient *client, MqttConnect *mc_connect)
             #endif
             return rc;
         }
-        len = rc;
+        client->write.len = rc;
 
     #ifdef WOLFMQTT_MULTITHREAD
         rc = wm_SemLock(&client->lockClient);
@@ -1121,29 +1464,35 @@ int MqttClient_Connect(MqttClient *client, MqttConnect *mc_connect)
     #endif
 
         /* Send connect packet */
-        rc = MqttPacket_Write(client, client->tx_buf, len);
+        rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
     #ifdef WOLFMQTT_MULTITHREAD
         wm_SemUnlock(&client->lockSend);
     #endif
-        if (rc != len) {
+        if (rc != client->write.len) {
+        #ifdef WOLFMQTT_MULTITHREAD
+            if (wm_SemLock(&client->lockClient) == 0) {
+                MqttClient_RespList_Remove(client, &mc_connect->pendResp);
+                wm_SemUnlock(&client->lockClient);
+            }
+        #endif
             return rc;
         }
     #ifdef WOLFMQTT_V5
         /* Enhanced authentication */
         if (client->enable_eauth == 1) {
-            mc_connect->stat = MQTT_MSG_AUTH;
+            mc_connect->stat.write = MQTT_MSG_AUTH;
         }
         else
     #endif
         {
-            mc_connect->stat = MQTT_MSG_WAIT;
+            mc_connect->stat.write = MQTT_MSG_WAIT;
         }
     }
 
 #ifdef WOLFMQTT_V5
     /* Enhanced authentication */
-    if (mc_connect->protocol_level > MQTT_CONNECT_PROTOCOL_LEVEL_4 && 
-            mc_connect->stat == MQTT_MSG_AUTH)
+    if (mc_connect->protocol_level > MQTT_CONNECT_PROTOCOL_LEVEL_4 &&
+            mc_connect->stat.write == MQTT_MSG_AUTH)
     {
         MqttAuth auth, *p_auth = &auth;
         MqttProp* prop, *conn_prop;
@@ -1161,7 +1510,7 @@ int MqttClient_Connect(MqttClient *client, MqttConnect *mc_connect)
             }
         #endif
             /* AUTH property was not set in connect structure */
-            return MQTT_CODE_ERROR_BAD_ARG;
+            return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
         }
 
         XMEMSET((void*)p_auth, 0, sizeof(MqttAuth));
@@ -1182,7 +1531,7 @@ int MqttClient_Connect(MqttClient *client, MqttConnect *mc_connect)
         if (rc == MQTT_CODE_CONTINUE)
             return rc;
     #endif
-        if (rc != len) {
+        if (rc < 0) {
         #ifdef WOLFMQTT_MULTITHREAD
             if (wm_SemLock(&client->lockClient) == 0) {
                 MqttClient_RespList_Remove(client, &mc_connect->pendResp);
@@ -1197,7 +1546,7 @@ int MqttClient_Connect(MqttClient *client, MqttConnect *mc_connect)
     /* Wait for connect ack packet */
     rc = MqttClient_WaitType(client, &mc_connect->ack,
         MQTT_PACKET_TYPE_CONNECT_ACK, 0, client->cmd_timeout_ms);
-#ifdef WOLFMQTT_NONBLOCK
+#if defined(WOLFMQTT_NONBLOCK) || defined(WOLFMQTT_MULTITHREAD)
     if (rc == MQTT_CODE_CONTINUE)
         return rc;
 #endif
@@ -1210,14 +1559,10 @@ int MqttClient_Connect(MqttClient *client, MqttConnect *mc_connect)
 #endif
 
     /* reset state */
-    mc_connect->stat = MQTT_MSG_BEGIN;
+    mc_connect->stat.write = MQTT_MSG_BEGIN;
 
     return rc;
 }
-
-#ifdef WOLFMQTT_TEST_NONBLOCK
-static int testNbAlt = 0;
-#endif
 
 static int MqttClient_Publish_ReadPayload(MqttClient* client,
     MqttPublish* publish, int timeout_ms)
@@ -1262,7 +1607,7 @@ static int MqttClient_Publish_ReadPayload(MqttClient* client,
             publish->buffer_len = 0;
 
             /* set state to reading payload */
-            publish->stat = MQTT_MSG_READ_PAYLOAD;
+            publish->stat.read = MQTT_MSG_PAYLOAD2;
 
             msg_len = (publish->total_len - publish->buffer_pos);
             if (msg_len > client->rx_buf_len) {
@@ -1271,7 +1616,8 @@ static int MqttClient_Publish_ReadPayload(MqttClient* client,
 
             /* make sure there is something to read */
             if (msg_len > 0) {
-                #ifdef WOLFMQTT_TEST_NONBLOCK
+                #if defined(WOLFMQTT_NONBLOCK) && defined(WOLFMQTT_TEST_NONBLOCK)
+                    static int testNbAlt = 0;
                     if (!testNbAlt) {
                         testNbAlt = 1;
                         return MQTT_CODE_CONTINUE;
@@ -1314,7 +1660,7 @@ static int MqttClient_Publish_WritePayload(MqttClient *client,
     int rc = MQTT_CODE_SUCCESS;
 
     if (client == NULL || publish == NULL)
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
 
     if (pubCb) {
         word32 tmp_len = publish->buffer_len;
@@ -1322,7 +1668,7 @@ static int MqttClient_Publish_WritePayload(MqttClient *client,
         do {
             /* Use the callback to get payload */
             if ((client->write.len = pubCb(publish)) < 0) {
-                return MQTT_CODE_ERROR_CALLBACK;
+                return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_CALLBACK);
             }
 
             if ((word32)client->write.len < publish->buffer_len) {
@@ -1365,31 +1711,29 @@ static int MqttClient_Publish_WritePayload(MqttClient *client,
             XMEMCPY(client->tx_buf, &publish->buffer[publish->buffer_pos],
                 client->write.len);
 
-        #ifdef WOLFMQTT_NONBLOCK
-            /* After sending the message new position is going to be
-               current + client->write.len */
-            publish->buffer_pos += client->write.len;
-        #else
+        #ifndef WOLFMQTT_NONBLOCK
             publish->intBuf_pos += client->write.len;
         #endif
         }
 
         /* Send packet and payload */
     #ifdef WOLFMQTT_NONBLOCK
-            rc = MqttPacket_Write(client, client->tx_buf,
-                    client->write.len);
+            rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
             if (rc < 0) {
                 return rc;
             }
 
+            /* ONLY if send was successful, update buffer position.
+             * Otherwise, MqttPacket_Write() will resume where it left off. */
+            publish->buffer_pos += client->write.len;
+
             /* Check if we are done sending publish message */
             if (publish->buffer_pos < publish->buffer_len) {
-                return MQTT_CODE_CONTINUE;
+                return MQTT_CODE_PUB_CONTINUE;
             }
     #else
         do {
-            rc = MqttPacket_Write(client, client->tx_buf,
-                    client->write.len);
+            rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
             if (rc < 0) {
                 return rc;
             }
@@ -1423,27 +1767,22 @@ static int MqttClient_Publish_WritePayload(MqttClient *client,
                 if (client->write.len > client->tx_buf_len) {
                     client->write.len = client->tx_buf_len;
                 }
-                rc = MQTT_CODE_CONTINUE;
+                rc = MQTT_CODE_PUB_CONTINUE;
             }
         }
     }
     return rc;
 }
 
-int MqttClient_Publish(MqttClient *client, MqttPublish *publish)
-{
-    return MqttClient_Publish_ex(client, publish, NULL);
-}
-
-int MqttClient_Publish_ex(MqttClient *client, MqttPublish *publish,
-                            MqttPublishCb pubCb)
+static int MqttPublishMsg(MqttClient *client, MqttPublish *publish,
+                          MqttPublishCb pubCb, int writeOnly)
 {
     int rc = MQTT_CODE_SUCCESS;
     MqttPacketType resp_type;
 
     /* Validate required arguments */
     if (client == NULL || publish == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
 #ifdef WOLFMQTT_V5
@@ -1454,11 +1793,11 @@ int MqttClient_Publish_ex(MqttClient *client, MqttPublish *publish,
     if ((publish->qos > client->max_qos) ||
         ((publish->retain == 1) && (client->retain_avail == 0)))
     {
-        return MQTT_CODE_ERROR_SERVER_PROP;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_SERVER_PROP);
     }
 #endif
 
-    switch (publish->stat)
+    switch (publish->stat.write)
     {
         case MQTT_MSG_BEGIN:
         {
@@ -1468,6 +1807,8 @@ int MqttClient_Publish_ex(MqttClient *client, MqttPublish *publish,
             if (rc != 0) {
                 return rc;
             }
+            publish->stat.isWriteLocked = 1;
+            MQTT_TRACE_MSG("lockSend");
         #endif
 
             /* Encode the publish packet */
@@ -1482,6 +1823,8 @@ int MqttClient_Publish_ex(MqttClient *client, MqttPublish *publish,
         #endif
             if (rc <= 0) {
             #ifdef WOLFMQTT_MULTITHREAD
+                MQTT_TRACE_MSG("unlockSend");
+                publish->stat.isWriteLocked = 0;
                 wm_SemUnlock(&client->lockSend);
             #endif
                 return rc;
@@ -1502,17 +1845,19 @@ int MqttClient_Publish_ex(MqttClient *client, MqttPublish *publish,
                     wm_SemUnlock(&client->lockClient);
                 }
                 if (rc != 0) {
+                    MQTT_TRACE_MSG("unlockSend");
+                    publish->stat.isWriteLocked = 0;
                     wm_SemUnlock(&client->lockSend);
                     return rc; /* Error locking client */
                 }
             }
         #endif
 
-            publish->stat = MQTT_MSG_WRITE;
-
-            FALL_THROUGH;
+            publish->stat.write = MQTT_MSG_HEADER;
         }
-        case MQTT_MSG_WRITE:
+        FALL_THROUGH;
+
+        case MQTT_MSG_HEADER:
         {
             /* Send packet */
             rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
@@ -1522,6 +1867,8 @@ int MqttClient_Publish_ex(MqttClient *client, MqttPublish *publish,
         #endif
             if (rc < 0) {
             #ifdef WOLFMQTT_MULTITHREAD
+                MQTT_TRACE_MSG("unlockSend");
+                publish->stat.isWriteLocked = 0;
                 wm_SemUnlock(&client->lockSend);
             #endif
             #ifdef WOLFMQTT_MULTITHREAD
@@ -1534,11 +1881,11 @@ int MqttClient_Publish_ex(MqttClient *client, MqttPublish *publish,
             }
 
             /* advance state */
-            publish->stat = MQTT_MSG_WRITE_PAYLOAD;
-
-            FALL_THROUGH;
+            publish->stat.write = MQTT_MSG_PAYLOAD;
         }
-        case MQTT_MSG_WRITE_PAYLOAD:
+        FALL_THROUGH;
+
+        case MQTT_MSG_PAYLOAD:
         {
             rc = MqttClient_Publish_WritePayload(client, publish, pubCb);
         #ifdef WOLFMQTT_NONBLOCK
@@ -1546,6 +1893,8 @@ int MqttClient_Publish_ex(MqttClient *client, MqttPublish *publish,
                 return rc;
         #endif
         #ifdef WOLFMQTT_MULTITHREAD
+            MQTT_TRACE_MSG("unlockSend");
+            publish->stat.isWriteLocked = 0;
             wm_SemUnlock(&client->lockSend);
         #endif
 
@@ -1563,10 +1912,9 @@ int MqttClient_Publish_ex(MqttClient *client, MqttPublish *publish,
             if (publish->qos == MQTT_QOS_0) {
                 break;
             }
-            publish->stat = MQTT_MSG_WAIT;
-
-            FALL_THROUGH;
+            publish->stat.write = MQTT_MSG_WAIT;
         }
+        FALL_THROUGH;
 
         case MQTT_MSG_WAIT:
         {
@@ -1577,10 +1925,22 @@ int MqttClient_Publish_ex(MqttClient *client, MqttPublish *publish,
                     MQTT_PACKET_TYPE_PUBLISH_ACK :
                     MQTT_PACKET_TYPE_PUBLISH_COMP;
 
-                /* Wait for publish response packet */
-                rc = MqttClient_WaitType(client, &publish->resp, resp_type,
-                    publish->packet_id, client->cmd_timeout_ms);
-            #ifdef WOLFMQTT_NONBLOCK
+            #ifdef WOLFMQTT_MULTITHREAD
+                if (writeOnly) {
+                    /* another thread will handle the wait type */
+                    rc = MqttClient_CheckPendResp(client, resp_type,
+                        publish->packet_id);
+                }
+                else
+            #endif
+                {
+                    (void)writeOnly; /* not used */
+
+                    /* Wait for publish response packet */
+                    rc = MqttClient_WaitType(client, &publish->resp, resp_type,
+                        publish->packet_id, client->cmd_timeout_ms);
+                }
+            #if defined(WOLFMQTT_NONBLOCK) || defined(WOLFMQTT_MULTITHREAD)
                 if (rc == MQTT_CODE_CONTINUE)
                     break;
             #endif
@@ -1594,25 +1954,25 @@ int MqttClient_Publish_ex(MqttClient *client, MqttPublish *publish,
             break;
         }
 
-    #ifdef WOLFMQTT_V5
+        case MQTT_MSG_ACK:
         case MQTT_MSG_AUTH:
-    #endif
-        case MQTT_MSG_READ:
-        case MQTT_MSG_READ_PAYLOAD:
+        case MQTT_MSG_PAYLOAD2:
         #ifdef WOLFMQTT_DEBUG_CLIENT
             PRINTF("MqttClient_Publish: Invalid state %d!",
-                publish->stat);
+                publish->stat.write);
         #endif
-            rc = MQTT_CODE_ERROR_STAT;
+            rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_STAT);
             break;
     } /* switch (publish->stat) */
 
     /* reset state */
+    if ((rc != MQTT_CODE_PUB_CONTINUE)
 #ifdef WOLFMQTT_NONBLOCK
-    if (rc != MQTT_CODE_CONTINUE)
+         && (rc != MQTT_CODE_CONTINUE)
 #endif
+        )
     {
-        publish->stat = MQTT_MSG_BEGIN;
+        publish->stat.write = MQTT_MSG_BEGIN;
     }
     if (rc > 0) {
         rc = MQTT_CODE_SUCCESS;
@@ -1621,14 +1981,34 @@ int MqttClient_Publish_ex(MqttClient *client, MqttPublish *publish,
     return rc;
 }
 
+int MqttClient_Publish(MqttClient *client, MqttPublish *publish)
+{
+    return MqttPublishMsg(client, publish, NULL, 0);
+}
+
+int MqttClient_Publish_ex(MqttClient *client, MqttPublish *publish,
+    MqttPublishCb pubCb)
+{
+    return MqttPublishMsg(client, publish, pubCb, 0);
+}
+
+#ifdef WOLFMQTT_MULTITHREAD
+int MqttClient_Publish_WriteOnly(MqttClient *client, MqttPublish *publish,
+    MqttPublishCb pubCb)
+{
+    return MqttPublishMsg(client, publish, pubCb, 1);
+}
+#endif
+
+
 int MqttClient_Subscribe(MqttClient *client, MqttSubscribe *subscribe)
 {
-    int rc, len, i;
+    int rc, i;
     MqttTopic* topic;
 
     /* Validate required arguments */
     if (client == NULL || subscribe == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
 #ifdef WOLFMQTT_V5
@@ -1636,7 +2016,7 @@ int MqttClient_Subscribe(MqttClient *client, MqttSubscribe *subscribe)
     subscribe->protocol_level = client->protocol_level;
 #endif
 
-    if (subscribe->stat == MQTT_MSG_BEGIN) {
+    if (subscribe->stat.write == MQTT_MSG_BEGIN) {
     #ifdef WOLFMQTT_MULTITHREAD
         /* Lock send socket mutex */
         rc = wm_SemLock(&client->lockSend);
@@ -1659,7 +2039,7 @@ int MqttClient_Subscribe(MqttClient *client, MqttSubscribe *subscribe)
         #endif
             return rc;
         }
-        len = rc;
+        client->write.len = rc;
 
     #ifdef WOLFMQTT_MULTITHREAD
         rc = wm_SemLock(&client->lockClient);
@@ -1676,11 +2056,11 @@ int MqttClient_Subscribe(MqttClient *client, MqttSubscribe *subscribe)
     #endif
 
         /* Send subscribe packet */
-        rc = MqttPacket_Write(client, client->tx_buf, len);
+        rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
     #ifdef WOLFMQTT_MULTITHREAD
         wm_SemUnlock(&client->lockSend);
     #endif
-        if (rc != len) {
+        if (rc != client->write.len) {
         #ifdef WOLFMQTT_MULTITHREAD
             if (wm_SemLock(&client->lockClient) == 0) {
                 MqttClient_RespList_Remove(client, &subscribe->pendResp);
@@ -1690,14 +2070,14 @@ int MqttClient_Subscribe(MqttClient *client, MqttSubscribe *subscribe)
             return rc;
         }
 
-        subscribe->stat = MQTT_MSG_WAIT;
+        subscribe->stat.write = MQTT_MSG_WAIT;
     }
 
     /* Wait for subscribe ack packet */
     rc = MqttClient_WaitType(client, &subscribe->ack,
         MQTT_PACKET_TYPE_SUBSCRIBE_ACK, subscribe->packet_id,
         client->cmd_timeout_ms);
-#ifdef WOLFMQTT_NONBLOCK
+#if defined(WOLFMQTT_NONBLOCK) || defined(WOLFMQTT_MULTITHREAD)
     if (rc == MQTT_CODE_CONTINUE)
         return rc;
 #endif
@@ -1711,27 +2091,25 @@ int MqttClient_Subscribe(MqttClient *client, MqttSubscribe *subscribe)
 
     /* Populate return codes */
     if (rc == MQTT_CODE_SUCCESS) {
-        for (i = 0; i < subscribe->topic_count; i++) {
+        for (i = 0; i < subscribe->topic_count && i < MAX_MQTT_TOPICS; i++) {
             topic = &subscribe->topics[i];
-            if (subscribe->ack.return_codes) {
-                topic->return_code = subscribe->ack.return_codes[i];
-            }
+            topic->return_code = subscribe->ack.return_codes[i];
         }
     }
 
     /* reset state */
-    subscribe->stat = MQTT_MSG_BEGIN;
+    subscribe->stat.write = MQTT_MSG_BEGIN;
 
     return rc;
 }
 
 int MqttClient_Unsubscribe(MqttClient *client, MqttUnsubscribe *unsubscribe)
 {
-    int rc, len;
+    int rc;
 
     /* Validate required arguments */
     if (client == NULL || unsubscribe == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
 #ifdef WOLFMQTT_V5
@@ -1739,7 +2117,7 @@ int MqttClient_Unsubscribe(MqttClient *client, MqttUnsubscribe *unsubscribe)
     unsubscribe->protocol_level = client->protocol_level;
 #endif
 
-    if (unsubscribe->stat == MQTT_MSG_BEGIN) {
+    if (unsubscribe->stat.write == MQTT_MSG_BEGIN) {
     #ifdef WOLFMQTT_MULTITHREAD
         /* Lock send socket mutex */
         rc = wm_SemLock(&client->lockSend);
@@ -1762,7 +2140,7 @@ int MqttClient_Unsubscribe(MqttClient *client, MqttUnsubscribe *unsubscribe)
         #endif
             return rc;
         }
-        len = rc;
+        client->write.len = rc;
 
     #ifdef WOLFMQTT_MULTITHREAD
         rc = wm_SemLock(&client->lockClient);
@@ -1780,11 +2158,11 @@ int MqttClient_Unsubscribe(MqttClient *client, MqttUnsubscribe *unsubscribe)
     #endif
 
         /* Send unsubscribe packet */
-        rc = MqttPacket_Write(client, client->tx_buf, len);
+        rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
     #ifdef WOLFMQTT_MULTITHREAD
         wm_SemUnlock(&client->lockSend);
     #endif
-        if (rc != len) {
+        if (rc != client->write.len) {
         #ifdef WOLFMQTT_MULTITHREAD
             if (wm_SemLock(&client->lockClient) == 0) {
                 MqttClient_RespList_Remove(client, &unsubscribe->pendResp);
@@ -1794,14 +2172,14 @@ int MqttClient_Unsubscribe(MqttClient *client, MqttUnsubscribe *unsubscribe)
             return rc;
         }
 
-        unsubscribe->stat = MQTT_MSG_WAIT;
+        unsubscribe->stat.write = MQTT_MSG_WAIT;
     }
 
     /* Wait for unsubscribe ack packet */
     rc = MqttClient_WaitType(client, &unsubscribe->ack,
         MQTT_PACKET_TYPE_UNSUBSCRIBE_ACK, unsubscribe->packet_id,
         client->cmd_timeout_ms);
-#ifdef WOLFMQTT_NONBLOCK
+#if defined(WOLFMQTT_NONBLOCK) || defined(WOLFMQTT_MULTITHREAD)
     if (rc == MQTT_CODE_CONTINUE)
         return rc;
 #endif
@@ -1821,21 +2199,21 @@ int MqttClient_Unsubscribe(MqttClient *client, MqttUnsubscribe *unsubscribe)
 #endif
 
     /* reset state */
-    unsubscribe->stat = MQTT_MSG_BEGIN;
+    unsubscribe->stat.write = MQTT_MSG_BEGIN;
 
     return rc;
 }
 
 int MqttClient_Ping_ex(MqttClient *client, MqttPing* ping)
 {
-    int rc, len;
+    int rc;
 
     /* Validate required arguments */
     if (client == NULL || ping == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
-    if (ping->stat == MQTT_MSG_BEGIN) {
+    if (ping->stat.write == MQTT_MSG_BEGIN) {
     #ifdef WOLFMQTT_MULTITHREAD
         /* Lock send socket mutex */
         rc = wm_SemLock(&client->lockSend);
@@ -1857,7 +2235,7 @@ int MqttClient_Ping_ex(MqttClient *client, MqttPing* ping)
         #endif
             return rc;
         }
-        len = rc;
+        client->write.len = rc;
 
     #ifdef WOLFMQTT_MULTITHREAD
         rc = wm_SemLock(&client->lockClient);
@@ -1874,11 +2252,11 @@ int MqttClient_Ping_ex(MqttClient *client, MqttPing* ping)
     #endif
 
         /* Send ping req packet */
-        rc = MqttPacket_Write(client, client->tx_buf, len);
+        rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
     #ifdef WOLFMQTT_MULTITHREAD
         wm_SemUnlock(&client->lockSend);
     #endif
-        if (rc != len) {
+        if (rc != client->write.len) {
         #ifdef WOLFMQTT_MULTITHREAD
             if (wm_SemLock(&client->lockClient) == 0) {
                 MqttClient_RespList_Remove(client, &ping->pendResp);
@@ -1888,13 +2266,13 @@ int MqttClient_Ping_ex(MqttClient *client, MqttPing* ping)
             return rc;
         }
 
-        ping->stat = MQTT_MSG_WAIT;
+        ping->stat.write = MQTT_MSG_WAIT;
     }
 
     /* Wait for ping resp packet */
     rc = MqttClient_WaitType(client, ping, MQTT_PACKET_TYPE_PING_RESP, 0,
         client->cmd_timeout_ms);
-#ifdef WOLFMQTT_NONBLOCK
+#if defined(WOLFMQTT_NONBLOCK) || defined(WOLFMQTT_MULTITHREAD)
     if (rc == MQTT_CODE_CONTINUE)
         return rc;
 #endif
@@ -1907,16 +2285,14 @@ int MqttClient_Ping_ex(MqttClient *client, MqttPing* ping)
 #endif
 
     /* reset state */
-    ping->stat = MQTT_MSG_BEGIN;
+    ping->stat.write = MQTT_MSG_BEGIN;
 
     return rc;
 }
 
 int MqttClient_Ping(MqttClient *client)
 {
-    MqttPing ping;
-    XMEMSET(&ping, 0, sizeof(ping));
-    return MqttClient_Ping_ex(client, &ping);
+    return MqttClient_Ping_ex(client, &client->msg.ping);
 }
 
 int MqttClient_Disconnect(MqttClient *client)
@@ -1926,11 +2302,11 @@ int MqttClient_Disconnect(MqttClient *client)
 
 int MqttClient_Disconnect_ex(MqttClient *client, MqttDisconnect *disconnect)
 {
-    int rc, len;
+    int rc;
 
     /* Validate required arguments */
     if (client == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
 #ifdef WOLFMQTT_V5
@@ -1961,33 +2337,41 @@ int MqttClient_Disconnect_ex(MqttClient *client, MqttDisconnect *disconnect)
     #endif
         return rc;
     }
-    len = rc;
+    client->write.len = rc;
 
     /* Send disconnect packet */
-    rc = MqttPacket_Write(client, client->tx_buf, len);
+    rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
 #ifdef WOLFMQTT_MULTITHREAD
     wm_SemUnlock(&client->lockSend);
 #endif
-    if (rc != len) {
+    if (rc != client->write.len) {
         return rc;
     }
 
+    rc = MQTT_CODE_SUCCESS;
+
+#if defined(WOLFMQTT_DISCONNECT_CB) && defined(WOLFMQTT_USE_CB_ON_DISCONNECT)
+    /* Trigger disconnect callback */
+    if (client->disconnect_cb)
+        client->disconnect_cb(client, rc, client->disconnect_ctx);
+#endif
+
     /* No response for MQTT disconnect packet */
 
-    return MQTT_CODE_SUCCESS;
+    return rc;
 }
 
 #ifdef WOLFMQTT_V5
 int MqttClient_Auth(MqttClient *client, MqttAuth* auth)
 {
-    int rc, len;
+    int rc;
 
     /* Validate required arguments */
     if (client == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
-    if (auth->stat == MQTT_MSG_BEGIN) {
+    if (auth->stat.write == MQTT_MSG_BEGIN) {
     #ifdef WOLFMQTT_MULTITHREAD
         /* Lock send socket mutex */
         rc = wm_SemLock(&client->lockSend);
@@ -2009,7 +2393,7 @@ int MqttClient_Auth(MqttClient *client, MqttAuth* auth)
         #endif
             return rc;
         }
-        len = rc;
+        client->write.len = rc;
 
     #ifdef WOLFMQTT_MULTITHREAD
         rc = wm_SemLock(&client->lockClient);
@@ -2026,11 +2410,11 @@ int MqttClient_Auth(MqttClient *client, MqttAuth* auth)
     #endif
 
         /* Send authentication packet */
-        rc = MqttPacket_Write(client, client->tx_buf, len);
+        rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
     #ifdef WOLFMQTT_MULTITHREAD
         wm_SemUnlock(&client->lockSend);
     #endif
-        if (rc != len) {
+        if (rc != client->write.len) {
         #ifdef WOLFMQTT_MULTITHREAD
             if (wm_SemLock(&client->lockClient) == 0) {
                 MqttClient_RespList_Remove(client, &auth->pendResp);
@@ -2040,13 +2424,13 @@ int MqttClient_Auth(MqttClient *client, MqttAuth* auth)
             return rc;
         }
 
-        auth->stat = MQTT_MSG_WAIT;
+        auth->stat.write = MQTT_MSG_WAIT;
     }
 
     /* Wait for auth packet */
     rc = MqttClient_WaitType(client, auth, MQTT_PACKET_TYPE_AUTH, 0,
         client->cmd_timeout_ms);
-#ifdef WOLFMQTT_NONBLOCK
+#if defined(WOLFMQTT_NONBLOCK) || defined(WOLFMQTT_MULTITHREAD)
     if (rc == MQTT_CODE_CONTINUE)
         return rc;
 #endif
@@ -2059,7 +2443,7 @@ int MqttClient_Auth(MqttClient *client, MqttAuth* auth)
 #endif
 
     /* reset state */
-    auth->stat = MQTT_MSG_BEGIN;
+    auth->stat.write = MQTT_MSG_BEGIN;
 
     return rc;
 }
@@ -2085,9 +2469,82 @@ int MqttClient_WaitMessage_ex(MqttClient *client, MqttObject* msg,
 int MqttClient_WaitMessage(MqttClient *client, int timeout_ms)
 {
     if (client == NULL)
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     return MqttClient_WaitMessage_ex(client, &client->msg, timeout_ms);
 }
+
+int MqttClient_CancelMessage(MqttClient *client, MqttObject* msg)
+{
+    int rc = MQTT_CODE_SUCCESS;
+#ifdef WOLFMQTT_MULTITHREAD
+    MqttPendResp* tmpResp;
+    MqttMsgStat* mms_stat;
+#endif
+
+    if (client == NULL || msg == NULL) {
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
+    }
+
+#ifdef WOLFMQTT_MULTITHREAD
+    /* all packet type structures must have MqttMsgStat at top */
+    mms_stat = (MqttMsgStat*)msg;
+
+#ifdef WOLFMQTT_DEBUG_CLIENT
+    PRINTF("Cancel Msg: %p", msg);
+#endif
+
+    /* Find pending response entry and remove */
+    rc = wm_SemLock(&client->lockClient);
+    if (rc != MQTT_CODE_SUCCESS) {
+        return rc;
+    }
+
+    for (tmpResp = client->firstPendResp;
+         tmpResp != NULL;
+         tmpResp = tmpResp->next)
+    {
+    #ifdef WOLFMQTT_DEBUG_CLIENT
+        PRINTF("\tMsg: %p (obj %p), Type %s (%d), ID %d, InProc %d, Done %d",
+            tmpResp, tmpResp->packet_obj,
+            MqttPacket_TypeDesc(tmpResp->packet_type),
+            tmpResp->packet_type, tmpResp->packet_id,
+            tmpResp->packetProcessing, tmpResp->packetDone);
+    #endif
+        if ((size_t)tmpResp->packet_obj == (size_t)msg ||
+            (size_t)tmpResp - OFFSETOF(MqttMessage, pendResp) == (size_t)msg) {
+        #ifdef WOLFMQTT_DEBUG_CLIENT
+            PRINTF("Found Cancel Msg: %p (obj %p), Type %s (%d), ID %d, "
+                   "InProc %d, Done %d",
+                tmpResp, tmpResp->packet_obj,
+                MqttPacket_TypeDesc(tmpResp->packet_type),
+                tmpResp->packet_type, tmpResp->packet_id,
+                tmpResp->packetProcessing, tmpResp->packetDone);
+        #endif
+            MqttClient_RespList_Remove(client, tmpResp);
+            break;
+        }
+    }
+    wm_SemUnlock(&client->lockClient);
+
+    /* clear any locks */
+    if (mms_stat->isReadLocked) {
+    #ifdef WOLFMQTT_DEBUG_CLIENT
+        PRINTF("Cancel Read Lock");
+    #endif
+        mms_stat->isReadLocked = 0;
+        wm_SemUnlock(&client->lockRecv);
+    }
+    if (mms_stat->isWriteLocked) {
+    #ifdef WOLFMQTT_DEBUG_CLIENT
+        PRINTF("Cancel Write Lock");
+    #endif
+        mms_stat->isWriteLocked = 0;
+        wm_SemUnlock(&client->lockSend);
+    }
+#endif
+    return rc;
+}
+
 
 int MqttClient_NetConnect(MqttClient *client, const char* host,
     word16 port, int timeout_ms, int use_tls, MqttTlsCb cb)
@@ -2137,6 +2594,8 @@ const char* MqttClient_ReturnCodeToString(int return_code)
             return "Continue"; /* would block */
         case MQTT_CODE_STDIN_WAKE:
             return "STDIN Wake";
+        case MQTT_CODE_PUB_CONTINUE:
+            return "Continue calling publish"; /* Chunked publish */
         case MQTT_CODE_ERROR_BAD_ARG:
             return "Error (Bad argument)";
         case MQTT_CODE_ERROR_OUT_OF_BUFFER:
@@ -2163,7 +2622,10 @@ const char* MqttClient_ReturnCodeToString(int return_code)
             return "Error (Server Property)";
         case MQTT_CODE_ERROR_CALLBACK:
             return "Error (Error in Callback)";
-
+        case MQTT_CODE_ERROR_SYSTEM:
+            return "Error (System resource failed)";
+        case MQTT_CODE_ERROR_NOT_FOUND:
+            return "Error (Not found)";
     }
     return "Unknown";
 }
@@ -2228,7 +2690,6 @@ static int SN_Client_HandlePacket(MqttClient* client, SN_MsgType packet_type,
         {
             /* Decode register */
             SN_Register reg_s;
-            int len;
 
             XMEMSET(&reg_s, 0, sizeof(SN_Register));
 
@@ -2273,14 +2734,14 @@ static int SN_Client_HandlePacket(MqttClient* client, SN_MsgType packet_type,
                 #endif
                     return rc;
                 }
-                len = rc;
+                client->write.len = rc;
 
                 /* Send regack packet */
-                rc = MqttPacket_Write(client, client->tx_buf, len);
+                rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
             #ifdef WOLFMQTT_MULTITHREAD
                 wm_SemUnlock(&client->lockSend);
             #endif
-                if (rc != len) { return rc; }
+                if (rc != client->write.len) { return rc; }
             }
 
             break;
@@ -2368,11 +2829,10 @@ static int SN_Client_HandlePacket(MqttClient* client, SN_MsgType packet_type,
                 #endif
                     return rc;
                 }
-                client->packet.buf_len = rc;
+                client->write.len = rc;
 
                 /* Send packet */
-                rc = MqttPacket_Write(client, client->tx_buf,
-                                                    client->packet.buf_len);
+                rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
             #ifdef WOLFMQTT_MULTITHREAD
                 wm_SemUnlock(&client->lockSend);
             #endif
@@ -2384,16 +2844,21 @@ static int SN_Client_HandlePacket(MqttClient* client, SN_MsgType packet_type,
         case SN_MSG_TYPE_PUBREC:
         case SN_MSG_TYPE_PUBREL:
         {
-            SN_PublishResp publish_resp;
-            XMEMSET(&publish_resp, 0, sizeof(SN_PublishResp));
+            SN_PublishResp publish_resp, *p_publish_resp = &publish_resp;
+            if (packet_obj) {
+                p_publish_resp = (SN_PublishResp*)packet_obj;
+            }
+            else {
+                XMEMSET(p_publish_resp, 0, sizeof(SN_PublishResp));
+            }
 
             /* Decode publish response message */
             rc = SN_Decode_PublishResp(client->rx_buf, client->packet.buf_len,
-                packet_type, &publish_resp);
+                packet_type, p_publish_resp);
             if (rc <= 0) {
                 return rc;
             }
-            packet_id = publish_resp.packet_id;
+            packet_id = p_publish_resp->packet_id;
 
             /* If Qos then send response */
             if (packet_type == SN_MSG_TYPE_PUBREC ||
@@ -2411,9 +2876,9 @@ static int SN_Client_HandlePacket(MqttClient* client, SN_MsgType packet_type,
             #endif
 
                 /* Encode publish response */
-                publish_resp.packet_id = packet_id;
+                p_publish_resp->packet_id = packet_id;
                 rc = SN_Encode_PublishResp(client->tx_buf,
-                    client->tx_buf_len, resp_type, &publish_resp);
+                    client->tx_buf_len, resp_type, p_publish_resp);
             #ifdef WOLFMQTT_DEBUG_CLIENT
                 PRINTF("MqttClient_EncodePacket: Len %d, Type %s (%d), ID %d",
                     rc, MqttPacket_TypeDesc(resp_type), resp_type, packet_id);
@@ -2424,11 +2889,10 @@ static int SN_Client_HandlePacket(MqttClient* client, SN_MsgType packet_type,
                 #endif
                     return rc;
                 }
-                client->packet.buf_len = rc;
+                client->write.len = rc;
 
                 /* Send packet */
-                rc = MqttPacket_Write(client, client->tx_buf,
-                        client->packet.buf_len);
+                rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
             #ifdef WOLFMQTT_MULTITHREAD
                 wm_SemUnlock(&client->lockSend);
             #endif
@@ -2483,8 +2947,6 @@ static int SN_Client_HandlePacket(MqttClient* client, SN_MsgType packet_type,
         }
         case SN_MSG_TYPE_PING_REQ:
         {
-            int len;
-
             /* Decode ping */
             rc = SN_Decode_Ping(client->rx_buf, client->packet.buf_len);
             if (rc <= 0) { return rc; }
@@ -2511,14 +2973,14 @@ static int SN_Client_HandlePacket(MqttClient* client, SN_MsgType packet_type,
             #endif
                 return rc;
             }
-            len = rc;
+            client->write.len = rc;
 
             /* Send ping resp packet */
-            rc = MqttPacket_Write(client, client->tx_buf, len);
+            rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
         #ifdef WOLFMQTT_MULTITHREAD
             wm_SemUnlock(&client->lockSend);
         #endif
-            if (rc != len) { return rc; }
+            if (rc != client->write.len) { return rc; }
 
             break;
         }
@@ -2554,6 +3016,13 @@ static int SN_Client_HandlePacket(MqttClient* client, SN_MsgType packet_type,
         {
             /* Decode Disconnect */
             rc = SN_Decode_Disconnect(client->rx_buf, client->packet.buf_len);
+
+#ifdef WOLFMQTT_DISCONNECT_CB
+            /* Call disconnect callback to allow handling broker disconnect */
+            if (client->disconnect_cb) {
+                client->disconnect_cb(client, rc, client->disconnect_ctx);
+            }
+#endif
             break;
         }
 
@@ -2568,6 +3037,8 @@ static int SN_Client_HandlePacket(MqttClient* client, SN_MsgType packet_type,
         }
     } /* switch (packet_type) */
 
+    (void)packet_id;
+
     return rc;
 }
 
@@ -2579,13 +3050,13 @@ static int SN_Client_WaitType(MqttClient *client, void* packet_obj,
     SN_MsgType packet_type;
 #ifdef WOLFMQTT_MULTITHREAD
     MqttPendResp *pendResp;
-    int readLocked;
 #endif
     MqttMsgStat* mms_stat;
     int waitMatchFound;
+    void* use_packet_obj = NULL;
 
     if (client == NULL || packet_obj == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* all packet type structures must have MqttMsgStat at top */
@@ -2598,47 +3069,43 @@ wait_again:
     packet_type = SN_MSG_TYPE_RESERVED;
 #ifdef WOLFMQTT_MULTITHREAD
     pendResp = NULL;
-    readLocked = 0;
 #endif
     waitMatchFound = 0;
 
 #ifdef WOLFMQTT_DEBUG_CLIENT
-    PRINTF("SN_Client_WaitType: Type %s (%d), ID %d",
-            SN_Packet_TypeDesc((SN_MsgType)wait_type),
-                wait_type, wait_packet_id);
+    #ifdef WOLFMQTT_NONBLOCK
+    if (client->lastRc != MQTT_CODE_CONTINUE)
+    #endif
+    {
+        PRINTF("SN_Client_WaitType: Type %s (%d), ID %d",
+                SN_Packet_TypeDesc((SN_MsgType)wait_type),
+                    wait_type, wait_packet_id);
+    }
 #endif
 
-    switch ((int)*mms_stat)
+    switch (mms_stat->read)
     {
         case MQTT_MSG_BEGIN:
-        {
-        #ifdef WOLFMQTT_MULTITHREAD
-            rc = wm_SemLock(&client->lockClient);
-            if (rc != 0) {
-                return rc;
-            }
-            else
-        #endif
-            {
-                /* reset the packet state */
-                client->packet.stat = MQTT_PK_BEGIN;
-            }
-        #ifdef WOLFMQTT_MULTITHREAD
-            wm_SemUnlock(&client->lockClient);
-        #endif
-            FALL_THROUGH;
-        }
-        case MQTT_MSG_WAIT:
         {
         #ifdef WOLFMQTT_MULTITHREAD
             /* Lock recv socket mutex */
             rc = wm_SemLock(&client->lockRecv);
             if (rc != 0) {
-                PRINTF("!!!!LOCK ERROR!!!!");
+                PRINTF("SN_Client_WaitType recv lock error");
                 return rc;
             }
-            readLocked = 1;
+            mms_stat->isReadLocked = 1;
+            MQTT_TRACE_MSG("SN lockRecv");
+        #endif
 
+            /* reset the packet state used by SN_Packet_Read */
+            client->packet.stat = MQTT_PK_BEGIN;
+        }
+        FALL_THROUGH;
+
+        case MQTT_MSG_WAIT:
+        {
+        #ifdef WOLFMQTT_MULTITHREAD
             /* Check to see if packet type and id have already completed */
             pendResp = NULL;
             rc = wm_SemLock(&client->lockClient);
@@ -2653,6 +3120,7 @@ wait_again:
                     #endif
                         MqttClient_RespList_Remove(client, pendResp);
                         wm_SemUnlock(&client->lockClient);
+                        MQTT_TRACE_MSG("SN unlockRecv");
                         wm_SemUnlock(&client->lockRecv);
                         return rc;
                     }
@@ -2660,12 +3128,11 @@ wait_again:
                 wm_SemUnlock(&client->lockClient);
             }
             else {
-                wm_SemUnlock(&client->lockRecv);
-                return rc;
+                break; /* error */
             }
         #endif /* WOLFMQTT_MULTITHREAD */
 
-            *mms_stat = MQTT_MSG_WAIT;
+            mms_stat->read = MQTT_MSG_WAIT;
 
             /* Wait for packet */
             rc = SN_Packet_Read(client, client->rx_buf, client->rx_buf_len,
@@ -2688,24 +3155,15 @@ wait_again:
                 client->packet.buf_len, packet_type, packet_id);
         #endif
 
-            *mms_stat = MQTT_MSG_READ;
-
-            FALL_THROUGH;
+            mms_stat->read = MQTT_MSG_HEADER;
         }
+        FALL_THROUGH;
 
-        case MQTT_MSG_READ:
-        case MQTT_MSG_READ_PAYLOAD:
+        case MQTT_MSG_HEADER:
+        case MQTT_MSG_PAYLOAD:
+        case MQTT_MSG_PAYLOAD2:
         {
             SN_MsgType use_packet_type;
-            void* use_packet_obj;
-
-        #ifdef WOLFMQTT_MULTITHREAD
-            readLocked = 1; /* if in this state read is locked */
-        #endif
-
-            if (*mms_stat == MQTT_MSG_READ_PAYLOAD) {
-                packet_type = SN_MSG_TYPE_PUBLISH;
-            }
 
             /* Determine if we received data for this request */
             if ((wait_type == SN_MSG_TYPE_ANY || wait_type == packet_type) &&
@@ -2729,10 +3187,12 @@ wait_again:
                         (MqttPacketType)packet_type, packet_id, &pendResp)) {
                     /* we found packet match this incoming read packet */
                     pendResp->packetProcessing = 1;
-                    use_packet_obj = pendResp->packet_obj;
-                    use_packet_type = (SN_MsgType)pendResp->packet_type;
-                    /* req from another thread... not a match */
-                    waitMatchFound = 0;
+                    if (pendResp->packet_obj != packet_obj) {
+                        use_packet_obj = pendResp->packet_obj;
+                        use_packet_type = (SN_MsgType)pendResp->packet_type;
+                        /* req from another thread... not a match */
+                        waitMatchFound = 0;
+                    }
                 }
                 wm_SemUnlock(&client->lockClient);
             }
@@ -2746,9 +3206,7 @@ wait_again:
 
         #ifdef WOLFMQTT_NONBLOCK
             if (rc == MQTT_CODE_CONTINUE) {
-                /* we have received some data, so keep the recv
-                    mutex lock active and return */
-                return rc;
+                break;
             }
         #endif
 
@@ -2774,35 +3232,58 @@ wait_again:
             break;
         }
 
-        case MQTT_MSG_WRITE:
+        case MQTT_MSG_ACK: /* ack handled in SN_Client_HandlePacket */
+        case MQTT_MSG_AUTH:
         default:
         {
         #ifdef WOLFMQTT_DEBUG_CLIENT
-            PRINTF("SN_Client_WaitType: Invalid state %d!", *mms_stat);
+            PRINTF("SN_Client_WaitType: Invalid state %d!", mms_stat->read);
         #endif
-            rc = MQTT_CODE_ERROR_STAT;
+            rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_STAT);
             break;
         }
     } /* switch (msg->stat) */
 
-#ifdef WOLFMQTT_MULTITHREAD
-    if (readLocked) {
-        wm_SemUnlock(&client->lockRecv);
+#ifdef WOLFMQTT_DEBUG_CLIENT
+    if (rc != MQTT_CODE_CONTINUE) {
+        PRINTF("SN_Client_WaitType: rc %d, state %d", rc, mms_stat->read);
     }
 #endif
 
-#ifdef WOLFMQTT_NONBLOCK
-    if (rc != MQTT_CODE_CONTINUE)
-#endif
-    {
+    if (mms_stat->read == MQTT_MSG_WAIT || rc != MQTT_CODE_CONTINUE) {
         /* reset state */
-        *mms_stat = MQTT_MSG_BEGIN;
+        mms_stat->read = MQTT_MSG_BEGIN;
+
+    #ifdef WOLFMQTT_MULTITHREAD
+        if (mms_stat->isReadLocked) {
+            mms_stat->isReadLocked = 0;
+            wm_SemUnlock(&client->lockRecv);
+        }
+    #endif
+    }
+
+#ifdef WOLFMQTT_NONBLOCK
+    #ifdef WOLFMQTT_DEBUG_CLIENT
+    client->lastRc = rc;
+    #endif
+    if (rc == MQTT_CODE_CONTINUE) {
+        return rc;
+    }
+#endif
+
+    /* Clear shared union for next call */
+    if ((MqttObject*)use_packet_obj == &client->msg) {
+        /* reset the members, but not the stat */
+        XMEMSET(((byte*)&client->msg.stat) + sizeof(client->msg.stat), 0,
+            sizeof(client->msg)-sizeof(client->msg.stat));
     }
 
     if (rc < 0) {
     #ifdef WOLFMQTT_DEBUG_CLIENT
-        PRINTF("SN_Client_WaitType: Failure: %s (%d)",
-            MqttClient_ReturnCodeToString(rc), rc);
+        if (rc != MQTT_CODE_CONTINUE) {
+            PRINTF("SN_Client_WaitType: Failure: %s (%d)",
+                MqttClient_ReturnCodeToString(rc), rc);
+        }
     #endif
         return rc;
     }
@@ -2824,7 +3305,7 @@ int SN_Client_SetRegisterCallback(MqttClient *client,
     int rc = MQTT_CODE_SUCCESS;
 
     if (client == NULL)
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
 
 #ifdef WOLFMQTT_MULTITHREAD
     rc = wm_SemLock(&client->lockClient);
@@ -2844,14 +3325,14 @@ int SN_Client_SetRegisterCallback(MqttClient *client,
 
 int SN_Client_SearchGW(MqttClient *client, SN_SearchGw *search)
 {
-    int rc, len = 0;
+    int rc;
 
     /* Validate required arguments */
     if (client == NULL || search == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
-    if (search->stat == MQTT_MSG_BEGIN) {
+    if (search->stat.write == MQTT_MSG_BEGIN) {
     #ifdef WOLFMQTT_MULTITHREAD
         /* Lock send socket mutex */
         rc = wm_SemLock(&client->lockSend);
@@ -2874,7 +3355,7 @@ int SN_Client_SearchGW(MqttClient *client, SN_SearchGw *search)
         #endif
             return rc;
         }
-        len = rc;
+        client->write.len = rc;
 
     #ifdef WOLFMQTT_MULTITHREAD
         rc = wm_SemLock(&client->lockClient);
@@ -2892,11 +3373,11 @@ int SN_Client_SearchGW(MqttClient *client, SN_SearchGw *search)
     #endif
 
         /* Send search for gateway packet */
-        rc = MqttPacket_Write(client, client->tx_buf, len);
+        rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
     #ifdef WOLFMQTT_MULTITHREAD
         wm_SemUnlock(&client->lockSend);
     #endif
-        if (rc != len) {
+        if (rc != client->write.len) {
         #ifdef WOLFMQTT_MULTITHREAD
             if (wm_SemLock(&client->lockClient) == 0) {
                 MqttClient_RespList_Remove(client, &search->pendResp);
@@ -2905,7 +3386,7 @@ int SN_Client_SearchGW(MqttClient *client, SN_SearchGw *search)
         #endif
             return rc;
         }
-        search->stat = MQTT_MSG_WAIT;
+        search->stat.write = MQTT_MSG_WAIT;
     }
 
     /* Wait for gateway info packet */
@@ -2923,18 +3404,18 @@ int SN_Client_SearchGW(MqttClient *client, SN_SearchGw *search)
 #endif
 
     /* reset state */
-    search->stat = MQTT_MSG_BEGIN;
+    search->stat.write = MQTT_MSG_BEGIN;
 
     return rc;
 }
 
 static int SN_WillTopic(MqttClient *client, SN_Will *will)
 {
-    int rc, len;
+    int rc;
 
     /* Validate required arguments */
     if (client == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
 #ifdef WOLFMQTT_MULTITHREAD
@@ -2975,7 +3456,7 @@ static int SN_WillTopic(MqttClient *client, SN_Will *will)
     #endif
 
         /* Encode Will Topic */
-        len = rc = SN_Encode_WillTopic(client->tx_buf, client->tx_buf_len,
+        rc = SN_Encode_WillTopic(client->tx_buf, client->tx_buf_len,
                 will);
     #ifdef WOLFMQTT_DEBUG_CLIENT
         PRINTF("EncodePacket: Len %d, Type %s (%d)",
@@ -2984,8 +3465,9 @@ static int SN_WillTopic(MqttClient *client, SN_Will *will)
     #endif
         if (rc > 0) {
             /* Send Will Topic packet */
-            rc = MqttPacket_Write(client, client->tx_buf, len);
-            if (rc == len) {
+            client->write.len = rc;
+            rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
+            if (rc == client->write.len) {
                 rc = 0;
             }
         }
@@ -2999,11 +3481,11 @@ static int SN_WillTopic(MqttClient *client, SN_Will *will)
 
 static int SN_WillMessage(MqttClient *client, SN_Will *will)
 {
-    int rc, len;
+    int rc;
 
     /* Validate required arguments */
     if (client == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
 #ifdef WOLFMQTT_MULTITHREAD
@@ -3045,7 +3527,7 @@ static int SN_WillMessage(MqttClient *client, SN_Will *will)
         }
     #endif
         /* Encode Will Message */
-        len = rc = SN_Encode_WillMsg(client->tx_buf,
+        rc = SN_Encode_WillMsg(client->tx_buf,
             client->tx_buf_len, will);
     #ifdef WOLFMQTT_DEBUG_CLIENT
         PRINTF("EncodePacket: Len %d, Type %s (%d)",
@@ -3054,8 +3536,9 @@ static int SN_WillMessage(MqttClient *client, SN_Will *will)
     #endif
         if (rc > 0) {
             /* Send Will Topic packet */
-            rc = MqttPacket_Write(client, client->tx_buf, len);
-            if (rc == len) {
+            client->write.len = rc;
+            rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
+            if (rc == client->write.len) {
                 rc = 0;
             }
         }
@@ -3069,15 +3552,15 @@ static int SN_WillMessage(MqttClient *client, SN_Will *will)
 
 int SN_Client_Connect(MqttClient *client, SN_Connect *mc_connect)
 {
-    int rc = 0, len = 0;
+    int rc = 0;
     static byte will_done;
 
     /* Validate required arguments */
     if ((client == NULL) || (mc_connect == NULL)) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
-    if (mc_connect->stat == MQTT_MSG_BEGIN) {
+    if (mc_connect->stat.write == MQTT_MSG_BEGIN) {
 
         will_done = 0;
 
@@ -3102,7 +3585,7 @@ int SN_Client_Connect(MqttClient *client, SN_Connect *mc_connect)
         #endif
             return rc;
         }
-        len = rc;
+        client->write.len = rc;
 
     #ifdef WOLFMQTT_MULTITHREAD
         rc = wm_SemLock(&client->lockClient);
@@ -3120,15 +3603,15 @@ int SN_Client_Connect(MqttClient *client, SN_Connect *mc_connect)
     #endif
 
         /* Send connect packet */
-        rc = MqttPacket_Write(client, client->tx_buf, len);
+        rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
     #ifdef WOLFMQTT_MULTITHREAD
         wm_SemUnlock(&client->lockSend);
     #endif
-        if (rc != len) {
+        if (rc != client->write.len) {
             return rc;
         }
 
-        mc_connect->stat = MQTT_MSG_WAIT;
+        mc_connect->stat.write = MQTT_MSG_WAIT;
     }
 
     if ((mc_connect->enable_lwt == 1) && (will_done != 1)) {
@@ -3162,21 +3645,21 @@ int SN_Client_Connect(MqttClient *client, SN_Connect *mc_connect)
 #endif
 
     /* reset state */
-    mc_connect->stat = MQTT_MSG_BEGIN;
+    mc_connect->stat.write = MQTT_MSG_BEGIN;
 
     return rc;
 }
 
 int SN_Client_WillTopicUpdate(MqttClient *client, SN_Will *will)
 {
-    int rc = 0, len = 0;
+    int rc = 0;
 
     /* Validate required arguments */
     if (client == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
-    if (will->stat == MQTT_MSG_BEGIN) {
+    if (will->stat.write == MQTT_MSG_BEGIN) {
     #ifdef WOLFMQTT_MULTITHREAD
         /* Lock send socket mutex */
         rc = wm_SemLock(&client->lockSend);
@@ -3186,7 +3669,7 @@ int SN_Client_WillTopicUpdate(MqttClient *client, SN_Will *will)
     #endif
 
         /* Encode Will Topic Update */
-        len = rc = SN_Encode_WillTopicUpdate(client->tx_buf,
+        rc = SN_Encode_WillTopicUpdate(client->tx_buf,
                 client->tx_buf_len, will);
     #ifdef WOLFMQTT_DEBUG_CLIENT
         PRINTF("MqttClient_EncodePacket: Len %d, Type %s (%d)",
@@ -3199,6 +3682,7 @@ int SN_Client_WillTopicUpdate(MqttClient *client, SN_Will *will)
         #endif
             return rc;
         }
+        client->write.len = rc;
 
     #ifdef WOLFMQTT_MULTITHREAD
         rc = wm_SemLock(&client->lockClient);
@@ -3216,11 +3700,11 @@ int SN_Client_WillTopicUpdate(MqttClient *client, SN_Will *will)
     #endif
 
         /* Send Will Topic Update packet */
-        rc = MqttPacket_Write(client, client->tx_buf, len);
+        rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
     #ifdef WOLFMQTT_MULTITHREAD
         wm_SemUnlock(&client->lockSend);
     #endif
-        if (rc != len) {
+        if (rc != client->write.len) {
         #ifdef WOLFMQTT_MULTITHREAD
             if (wm_SemLock(&client->lockClient) == 0) {
                 MqttClient_RespList_Remove(client, &will->pendResp);
@@ -3228,7 +3712,7 @@ int SN_Client_WillTopicUpdate(MqttClient *client, SN_Will *will)
             }
         #endif
         }
-        will->stat = MQTT_MSG_WAIT;
+        will->stat.write = MQTT_MSG_WAIT;
     }
 
     /* Wait for Will Topic Update Response packet */
@@ -3246,21 +3730,21 @@ int SN_Client_WillTopicUpdate(MqttClient *client, SN_Will *will)
 #endif
 
     /* reset state */
-    will->stat = MQTT_MSG_BEGIN;
+    will->stat.write = MQTT_MSG_BEGIN;
 
     return rc;
 }
 
 int SN_Client_WillMsgUpdate(MqttClient *client, SN_Will *will)
 {
-    int rc = 0, len = 0;
+    int rc = 0;
 
     /* Validate required arguments */
     if ((client == NULL) || (will == NULL)) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
-    if (will->stat == MQTT_MSG_BEGIN) {
+    if (will->stat.write == MQTT_MSG_BEGIN) {
     #ifdef WOLFMQTT_MULTITHREAD
         /* Lock send socket mutex */
         rc = wm_SemLock(&client->lockSend);
@@ -3269,7 +3753,7 @@ int SN_Client_WillMsgUpdate(MqttClient *client, SN_Will *will)
         }
     #endif
         /* Encode Will Message Update */
-        len = rc = SN_Encode_WillMsgUpdate(client->tx_buf,
+        rc = SN_Encode_WillMsgUpdate(client->tx_buf,
                 client->tx_buf_len, will);
     #ifdef WOLFMQTT_DEBUG_CLIENT
         PRINTF("MqttClient_EncodePacket: Len %d, Type %s (%d)",
@@ -3282,6 +3766,7 @@ int SN_Client_WillMsgUpdate(MqttClient *client, SN_Will *will)
         #endif
             return rc;
         }
+        client->write.len = rc;
 
     #ifdef WOLFMQTT_MULTITHREAD
         rc = wm_SemLock(&client->lockClient);
@@ -3299,11 +3784,11 @@ int SN_Client_WillMsgUpdate(MqttClient *client, SN_Will *will)
     #endif
 
         /* Send Will Message Update packet */
-        rc = MqttPacket_Write(client, client->tx_buf, len);
+        rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
     #ifdef WOLFMQTT_MULTITHREAD
         wm_SemUnlock(&client->lockSend);
     #endif
-        if (rc != len) {
+        if (rc != client->write.len) {
         #ifdef WOLFMQTT_MULTITHREAD
             if (wm_SemLock(&client->lockClient) == 0) {
                 MqttClient_RespList_Remove(client, &will->pendResp);
@@ -3311,7 +3796,7 @@ int SN_Client_WillMsgUpdate(MqttClient *client, SN_Will *will)
             }
         #endif
         }
-        will->stat = MQTT_MSG_WAIT;
+        will->stat.write = MQTT_MSG_WAIT;
     }
 
     /* Wait for Will Message Update Response packet */
@@ -3329,7 +3814,7 @@ int SN_Client_WillMsgUpdate(MqttClient *client, SN_Will *will)
 #endif
 
     /* reset state */
-    will->stat = MQTT_MSG_BEGIN;
+    will->stat.write = MQTT_MSG_BEGIN;
 
     return rc;
 
@@ -3337,14 +3822,14 @@ int SN_Client_WillMsgUpdate(MqttClient *client, SN_Will *will)
 
 int SN_Client_Subscribe(MqttClient *client, SN_Subscribe *subscribe)
 {
-    int rc = -1, len;
+    int rc = -1;
 
     /* Validate required arguments */
     if (client == NULL || subscribe == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
-    if (subscribe->stat == MQTT_MSG_BEGIN) {
+    if (subscribe->stat.write == MQTT_MSG_BEGIN) {
     #ifdef WOLFMQTT_MULTITHREAD
         /* Lock send socket mutex */
         rc = wm_SemLock(&client->lockSend);
@@ -3367,7 +3852,7 @@ int SN_Client_Subscribe(MqttClient *client, SN_Subscribe *subscribe)
         #endif
             return rc;
         }
-        len = rc;
+        client->write.len = rc;
 
     #ifdef WOLFMQTT_MULTITHREAD
         rc = wm_SemLock(&client->lockClient);
@@ -3385,11 +3870,11 @@ int SN_Client_Subscribe(MqttClient *client, SN_Subscribe *subscribe)
     #endif
 
         /* Send subscribe packet */
-        rc = MqttPacket_Write(client, client->tx_buf, len);
+        rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
     #ifdef WOLFMQTT_MULTITHREAD
         wm_SemUnlock(&client->lockSend);
     #endif
-        if (rc != len) {
+        if (rc != client->write.len) {
         #ifdef WOLFMQTT_MULTITHREAD
             if (wm_SemLock(&client->lockClient) == 0) {
                 MqttClient_RespList_Remove(client, &subscribe->pendResp);
@@ -3399,7 +3884,7 @@ int SN_Client_Subscribe(MqttClient *client, SN_Subscribe *subscribe)
             return rc;
         }
 
-        subscribe->stat = MQTT_MSG_WAIT;
+        subscribe->stat.write = MQTT_MSG_WAIT;
     }
 
     /* Wait for subscribe ack packet */
@@ -3418,7 +3903,7 @@ int SN_Client_Subscribe(MqttClient *client, SN_Subscribe *subscribe)
 #endif
 
     /* reset state */
-    subscribe->stat = MQTT_MSG_BEGIN;
+    subscribe->stat.write = MQTT_MSG_BEGIN;
 
     return rc;
 }
@@ -3430,10 +3915,10 @@ int SN_Client_Publish(MqttClient *client, SN_Publish *publish)
 
     /* Validate required arguments */
     if (client == NULL || publish == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
-    switch ((int)publish->stat)
+    switch (publish->stat.write)
     {
         case MQTT_MSG_BEGIN:
         {
@@ -3487,15 +3972,16 @@ int SN_Client_Publish(MqttClient *client, SN_Publish *publish)
             }
         #endif
 
-            publish->stat = MQTT_MSG_WRITE;
-
-            FALL_THROUGH;
+            publish->stat.write = MQTT_MSG_HEADER;
         }
-        case MQTT_MSG_WRITE:
+        FALL_THROUGH;
+
+        case MQTT_MSG_HEADER:
+        case MQTT_MSG_PAYLOAD:
+        case MQTT_MSG_PAYLOAD2:
         {
             /* Send packet and payload */
-            rc = MqttPacket_Write(client, client->tx_buf,
-                    client->write.len);
+            rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
         #ifdef WOLFMQTT_NONBLOCK
             if (rc == MQTT_CODE_CONTINUE)
                 return rc;
@@ -3527,10 +4013,9 @@ int SN_Client_Publish(MqttClient *client, SN_Publish *publish)
                 break;
             }
 
-            publish->stat = MQTT_MSG_WAIT;
-
-            FALL_THROUGH;
+            publish->stat.write = MQTT_MSG_WAIT;
         }
+        FALL_THROUGH;
 
         case MQTT_MSG_WAIT:
         {
@@ -3563,13 +4048,14 @@ int SN_Client_Publish(MqttClient *client, SN_Publish *publish)
             break;
         }
 
-        case MQTT_MSG_READ:
-        case MQTT_MSG_READ_PAYLOAD:
+        case MQTT_MSG_ACK:
+        case MQTT_MSG_AUTH:
+        default:
         #ifdef WOLFMQTT_DEBUG_CLIENT
             PRINTF("SN_Client_Publish: Invalid state %d!",
-                publish->stat);
+                publish->stat.write);
         #endif
-            rc = MQTT_CODE_ERROR_STAT;
+            rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_STAT);
             break;
     } /* switch (publish->stat) */
 
@@ -3578,7 +4064,7 @@ int SN_Client_Publish(MqttClient *client, SN_Publish *publish)
     if (rc != MQTT_CODE_CONTINUE)
 #endif
     {
-        publish->stat = MQTT_MSG_BEGIN;
+        publish->stat.write = MQTT_MSG_BEGIN;
     }
     if (rc > 0) {
         rc = MQTT_CODE_SUCCESS;
@@ -3589,14 +4075,14 @@ int SN_Client_Publish(MqttClient *client, SN_Publish *publish)
 
 int SN_Client_Unsubscribe(MqttClient *client, SN_Unsubscribe *unsubscribe)
 {
-    int rc, len;
+    int rc;
 
     /* Validate required arguments */
     if (client == NULL || unsubscribe == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
-    if (unsubscribe->stat == MQTT_MSG_BEGIN) {
+    if (unsubscribe->stat.write == MQTT_MSG_BEGIN) {
     #ifdef WOLFMQTT_MULTITHREAD
         /* Lock send socket mutex */
         rc = wm_SemLock(&client->lockSend);
@@ -3619,7 +4105,7 @@ int SN_Client_Unsubscribe(MqttClient *client, SN_Unsubscribe *unsubscribe)
         #endif
             return rc;
         }
-        len = rc;
+        client->write.len = rc;
 
     #ifdef WOLFMQTT_MULTITHREAD
         rc = wm_SemLock(&client->lockClient);
@@ -3637,11 +4123,11 @@ int SN_Client_Unsubscribe(MqttClient *client, SN_Unsubscribe *unsubscribe)
     #endif
 
         /* Send unsubscribe packet */
-        rc = MqttPacket_Write(client, client->tx_buf, len);
+        rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
     #ifdef WOLFMQTT_MULTITHREAD
         wm_SemUnlock(&client->lockSend);
     #endif
-        if (rc != len) {
+        if (rc != client->write.len) {
         #ifdef WOLFMQTT_MULTITHREAD
             if (wm_SemLock(&client->lockClient) == 0) {
                 MqttClient_RespList_Remove(client, &unsubscribe->pendResp);
@@ -3649,7 +4135,7 @@ int SN_Client_Unsubscribe(MqttClient *client, SN_Unsubscribe *unsubscribe)
             }
         #endif
         }
-        unsubscribe->stat = MQTT_MSG_WAIT;
+        unsubscribe->stat.write = MQTT_MSG_WAIT;
     }
 
     /* Wait for unsubscribe ack packet */
@@ -3668,21 +4154,21 @@ int SN_Client_Unsubscribe(MqttClient *client, SN_Unsubscribe *unsubscribe)
     #endif
 
     /* reset state */
-    unsubscribe->stat = MQTT_MSG_BEGIN;
+    unsubscribe->stat.write = MQTT_MSG_BEGIN;
 
     return rc;
 }
 
 int SN_Client_Register(MqttClient *client, SN_Register *regist)
 {
-    int rc, len;
+    int rc;
 
     /* Validate required arguments */
     if (client == NULL || regist == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
-    if (regist->stat == MQTT_MSG_BEGIN) {
+    if (regist->stat.write == MQTT_MSG_BEGIN) {
     #ifdef WOLFMQTT_MULTITHREAD
         /* Lock send socket mutex */
         rc = wm_SemLock(&client->lockSend);
@@ -3704,7 +4190,7 @@ int SN_Client_Register(MqttClient *client, SN_Register *regist)
         #endif
             return rc;
         }
-        len = rc;
+        client->write.len = rc;
 
     #ifdef WOLFMQTT_MULTITHREAD
         rc = wm_SemLock(&client->lockClient);
@@ -3722,11 +4208,11 @@ int SN_Client_Register(MqttClient *client, SN_Register *regist)
     #endif
 
         /* Send register packet */
-        rc = MqttPacket_Write(client, client->tx_buf, len);
+        rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
     #ifdef WOLFMQTT_MULTITHREAD
         wm_SemUnlock(&client->lockSend);
     #endif
-        if (rc != len) {
+        if (rc != client->write.len) {
         #ifdef WOLFMQTT_MULTITHREAD
             if (wm_SemLock(&client->lockClient) == 0) {
                 MqttClient_RespList_Remove(client, &regist->pendResp);
@@ -3736,7 +4222,7 @@ int SN_Client_Register(MqttClient *client, SN_Register *regist)
             return rc;
         }
 
-        regist->stat = MQTT_MSG_WAIT;
+        regist->stat.write = MQTT_MSG_WAIT;
     }
 
     /* Wait for register acknowledge packet */
@@ -3754,19 +4240,19 @@ int SN_Client_Register(MqttClient *client, SN_Register *regist)
 #endif
 
     /* reset state */
-    regist->stat = MQTT_MSG_BEGIN;
+    regist->stat.write = MQTT_MSG_BEGIN;
 
     return rc;
 }
 
 int SN_Client_Ping(MqttClient *client, SN_PingReq *ping)
 {
-    int rc, len;
+    int rc;
     SN_PingReq loc_ping;
 
     /* Validate required arguments */
     if (client == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     if (ping == NULL) {
@@ -3774,7 +4260,7 @@ int SN_Client_Ping(MqttClient *client, SN_PingReq *ping)
         ping = &loc_ping;
     }
 
-    if (ping->stat == MQTT_MSG_BEGIN) {
+    if (ping->stat.write == MQTT_MSG_BEGIN) {
     #ifdef WOLFMQTT_MULTITHREAD
         /* Lock send socket mutex */
         rc = wm_SemLock(&client->lockSend);
@@ -3797,7 +4283,7 @@ int SN_Client_Ping(MqttClient *client, SN_PingReq *ping)
         #endif
             return rc;
         }
-        len = rc;
+        client->write.len = rc;
 
     #ifdef WOLFMQTT_MULTITHREAD
         rc = wm_SemLock(&client->lockClient);
@@ -3815,11 +4301,11 @@ int SN_Client_Ping(MqttClient *client, SN_PingReq *ping)
     #endif
 
         /* Send ping req packet */
-        rc = MqttPacket_Write(client, client->tx_buf, len);
+        rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
     #ifdef WOLFMQTT_MULTITHREAD
         wm_SemUnlock(&client->lockSend);
     #endif
-        if (rc != len) {
+        if (rc != client->write.len) {
         #ifdef WOLFMQTT_MULTITHREAD
             if (wm_SemLock(&client->lockClient) == 0) {
                 MqttClient_RespList_Remove(client, &ping->pendResp);
@@ -3829,7 +4315,7 @@ int SN_Client_Ping(MqttClient *client, SN_PingReq *ping)
             return rc;
         }
 
-        ping->stat = MQTT_MSG_WAIT;
+        ping->stat.write = MQTT_MSG_WAIT;
     }
 
     /* Wait for ping resp packet */
@@ -3847,7 +4333,7 @@ int SN_Client_Ping(MqttClient *client, SN_PingReq *ping)
 #endif
 
     /* reset state */
-    ping->stat = MQTT_MSG_BEGIN;
+    ping->stat.write = MQTT_MSG_BEGIN;
 
     return rc;
 }
@@ -3859,11 +4345,11 @@ int SN_Client_Disconnect(MqttClient *client)
 
 int SN_Client_Disconnect_ex(MqttClient *client, SN_Disconnect *disconnect)
 {
-    int rc, len;
+    int rc;
 
     /* Validate required arguments */
     if (client == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
 #ifdef WOLFMQTT_MULTITHREAD
@@ -3887,8 +4373,7 @@ int SN_Client_Disconnect_ex(MqttClient *client, SN_Disconnect *disconnect)
     #endif
         return rc;
     }
-    len = rc;
-
+    client->write.len = rc;
 
 #ifdef WOLFMQTT_MULTITHREAD
     if ((disconnect != NULL) && (disconnect->sleepTmr != 0)) {
@@ -3908,11 +4393,11 @@ int SN_Client_Disconnect_ex(MqttClient *client, SN_Disconnect *disconnect)
 #endif
 
     /* Send disconnect packet */
-    rc = MqttPacket_Write(client, client->tx_buf, len);
+    rc = MqttPacket_Write(client, client->tx_buf, client->write.len);
 #ifdef WOLFMQTT_MULTITHREAD
     wm_SemUnlock(&client->lockSend);
 #endif
-    if (rc != len) {
+    if (rc != client->write.len) {
     #ifdef WOLFMQTT_MULTITHREAD
         if (wm_SemLock(&client->lockClient) == 0) {
             MqttClient_RespList_Remove(client, &disconnect->pendResp);
@@ -3921,16 +4406,17 @@ int SN_Client_Disconnect_ex(MqttClient *client, SN_Disconnect *disconnect)
     #endif
         return rc;
     }
+    else {
+        rc = MQTT_CODE_SUCCESS;
+    }
 
     /* If sleep was set, wait for response disconnect packet */
     if ((disconnect != NULL) && (disconnect->sleepTmr != 0)) {
-        rc = SN_Client_WaitType(client, NULL,
+        rc = SN_Client_WaitType(client, disconnect,
                 SN_MSG_TYPE_DISCONNECT, 0, client->cmd_timeout_ms);
     #ifdef WOLFMQTT_NONBLOCK
         if (rc == MQTT_CODE_CONTINUE)
             return rc;
-    #else
-        (void)rc;
     #endif
     #ifdef WOLFMQTT_MULTITHREAD
         if (wm_SemLock(&client->lockClient) == 0) {
@@ -3940,7 +4426,7 @@ int SN_Client_Disconnect_ex(MqttClient *client, SN_Disconnect *disconnect)
     #endif
     }
 
-    return MQTT_CODE_SUCCESS;
+    return rc;
 }
 
 int SN_Client_WaitMessage_ex(MqttClient *client, SN_Object* packet_obj,
@@ -3953,7 +4439,7 @@ int SN_Client_WaitMessage_ex(MqttClient *client, SN_Object* packet_obj,
 int SN_Client_WaitMessage(MqttClient *client, int timeout_ms)
 {
     if (client == NULL)
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     return SN_Client_WaitMessage_ex(client, &client->msgSN, timeout_ms);
 }
 

@@ -1,6 +1,6 @@
 /* wiot.c
  *
- * Copyright (C) 2006-2020 wolfSSL Inc.
+ * Copyright (C) 2006-2022 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -113,8 +113,8 @@ static int mqtt_message_cb(MqttClient *client, MqttMessage *msg,
     }
     XMEMCPY(buf, msg->buffer, len);
     buf[len] = '\0'; /* Make sure its null terminated */
-    PRINTF("Payload (%d - %d): %s",
-        msg->buffer_pos, msg->buffer_pos + len, buf);
+    PRINTF("Payload (%d - %d) printing %d bytes:" LINE_END "%s",
+        msg->buffer_pos, msg->buffer_pos + msg->buffer_len, len, buf);
 
     if (msg_done) {
         PRINTF("MQTT Message: Done");
@@ -228,9 +228,10 @@ int wiot_test(MQTTCtx *mqttCtx)
     mqttCtx->subscribe.topics = mqttCtx->topics;
 #ifdef WIOT_USE_QUICKSTART
     /* Print web site URL to monitor client activity */
-    PRINTF("\r\nTo view the published sample data visit:");
+    PRINTF("");
+    PRINTF("To view the published sample data visit:");
     PRINTF("https://" WIOT_ORG_ID ".internetofthings.ibmcloud.com/#/device/" WIOT_DEV_ID "/" WIOT_EVT "/");
-    PRINTF("\r\n");
+    PRINTF("");
 #endif
 
     rc = MqttClient_Subscribe(&mqttCtx->client, &mqttCtx->subscribe);

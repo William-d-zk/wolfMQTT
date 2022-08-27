@@ -1,6 +1,6 @@
 /* mqtt_packet.c
  *
- * Copyright (C) 2006-2020 wolfSSL Inc.
+ * Copyright (C) 2006-2022 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -127,7 +127,7 @@ static const struct MqttPropMatrix gPropMatrix[] = {
 };
 
 #ifndef MQTT_MAX_PROPS
-#define MQTT_MAX_PROPS 10
+#define MQTT_MAX_PROPS 30
 #endif
 
 /* Property structure allocation array. Property type equal
@@ -147,7 +147,7 @@ static int MqttEncode_FixedHeader(byte *tx_buf, int tx_buf_len, int remain_len,
 
     /* make sure destination buffer has space for header */
     if (tx_buf_len < MQTT_PACKET_MAX_LEN_BYTES+1) {
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     /* Encode fixed header */
@@ -188,7 +188,7 @@ static int MqttDecode_FixedHeader(byte *rx_buf, int rx_buf_len, int *remain_len,
 
     /* Validate packet type */
     if (MQTT_PACKET_TYPE_GET(header->type_flags) != type) {
-        return MQTT_CODE_ERROR_PACKET_TYPE;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
     }
 
     /* Extract header flags */
@@ -217,23 +217,23 @@ static int MqttDecode_FixedHeader(byte *rx_buf, int rx_buf_len, int *remain_len,
 int MqttDecode_Vbi(byte *buf, word32 *value, word32 buf_len)
 {
     word32 rc = 0;
-    int multiplier = 1;
+    word32 multiplier = 1;
     byte encodedByte;
 
     *value = 0;
     do {
-        if (buf_len < rc + 1)
-            return MQTT_CODE_ERROR_OUT_OF_BUFFER;
-       encodedByte = *(buf++);
-       *value += (encodedByte & ~MQTT_PACKET_LEN_ENCODE_MASK) * multiplier;
-       multiplier *= MQTT_PACKET_LEN_ENCODE_MASK;
-       if (multiplier > (MQTT_PACKET_LEN_ENCODE_MASK *
-                         MQTT_PACKET_LEN_ENCODE_MASK *
-                         MQTT_PACKET_LEN_ENCODE_MASK))
-       {
-          return MQTT_CODE_ERROR_MALFORMED_DATA;
-       }
-       rc++;
+        if (buf_len < rc + 1) {
+            return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
+        }
+        if (rc >= 4) {
+            return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
+        }
+
+        encodedByte = *(buf++);
+        *value += (word32)(encodedByte & ~MQTT_PACKET_LEN_ENCODE_MASK) *
+                           multiplier;
+        multiplier *= MQTT_PACKET_LEN_ENCODE_MASK;
+        rc++;
     } while ((encodedByte & MQTT_PACKET_LEN_ENCODE_MASK) != 0);
 
     return (int)rc;
@@ -248,17 +248,17 @@ int MqttEncode_Vbi(byte *buf, word32 x)
     byte encodedByte;
 
     do {
-       encodedByte = x % MQTT_PACKET_LEN_ENCODE_MASK;
-       x /= MQTT_PACKET_LEN_ENCODE_MASK;
-       // if there are more data to encode, set the top bit of this byte
-       if (x > 0) {
-          encodedByte |= MQTT_PACKET_LEN_ENCODE_MASK;
-       }
-       if (buf != NULL) {
-           *(buf++) = encodedByte;
-       }
-       rc++;
-    } while (x > 0);
+        encodedByte = (x & ~MQTT_PACKET_LEN_ENCODE_MASK) & 0xFF;
+        x >>= 7;
+        /* if there are more data to encode, set the top bit of this byte */
+        if (x > 0) {
+            encodedByte |= MQTT_PACKET_LEN_ENCODE_MASK;
+        }
+        if (buf != NULL) {
+            *(buf++) = encodedByte;
+        }
+        rc++;
+    } while (x > 0 && rc < 4);
 
     return rc;
 }
@@ -267,8 +267,8 @@ int MqttEncode_Vbi(byte *buf, word32 x)
 int MqttDecode_Num(byte* buf, word16 *len)
 {
     if (len) {
-        *len = buf[0];
-        *len = (*len << 8) | buf[1];
+        *len =  (word32)buf[0] << 8;
+        *len += buf[1];
     }
     return MQTT_DATA_LEN_SIZE;
 }
@@ -288,10 +288,10 @@ int MqttEncode_Num(byte *buf, word16 len)
 int MqttDecode_Int(byte* buf, word32* len)
 {
     if (len) {
-        *len = buf[0];
-        *len = (*len <<  8) | buf[1];
-        *len = (*len << 16) | buf[2];
-        *len = (*len << 24) | buf[3];
+        *len =  (word32)buf[0] << 24;
+        *len += (word32)buf[1] << 16;
+        *len += (word32)buf[2] << 8;
+        *len += buf[3];
     }
     return MQTT_DATA_INT_SIZE;
 }
@@ -365,10 +365,10 @@ int MqttEncode_Props(MqttPacketType packet, MqttProp* props, byte* buf)
 
     /* TODO: Check against max size. Sometimes all properties are not
              expected to be added */
-    // TODO: Validate property type is allowed for packet type
+    /* TODO: Validate property type is allowed for packet type */
 
     /* loop through the list properties */
-    while (cur_prop != NULL)
+    while ((cur_prop != NULL) && (rc >= 0))
     {
         /* TODO: validate packet type */
         (void)packet;
@@ -459,7 +459,8 @@ int MqttEncode_Props(MqttPacketType packet, MqttProp* props, byte* buf)
             case MQTT_DATA_TYPE_NONE:
             default:
             {
-                /* Do nothing */
+                /* Invalid property data type */
+                rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PROPERTY);
                 break;
             }
         }
@@ -478,38 +479,40 @@ int MqttEncode_Props(MqttPacketType packet, MqttProp* props, byte* buf)
 int MqttDecode_Props(MqttPacketType packet, MqttProp** props, byte* pbuf,
         word32 buf_len, word32 prop_len)
 {
-    /* TODO: Validate property type is allowed for packet type */
-
     int rc = 0;
-    int tmp;
+    int total, tmp;
     MqttProp* cur_prop;
     byte* buf = pbuf;
 
     *props = NULL;
+    total = 0;
 
-    while (prop_len > 0)
+    while (((int)prop_len > 0) && (rc >= 0))
     {
         /* Allocate a structure and add to head. */
         cur_prop = MqttProps_Add(props);
-        if (cur_prop == NULL)
-            return MQTT_CODE_ERROR_MEMORY;
+        if (cur_prop == NULL) {
+            rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MEMORY);
+            break;
+        }
 
         /* Decode the Identifier */
-        tmp = MqttDecode_Vbi(buf, (word32*)&cur_prop->type,
+        rc = MqttDecode_Vbi(buf, (word32*)&cur_prop->type,
                 (word32)(buf_len - (buf - pbuf)));
-        if (tmp < 0) {
-            return tmp;
+        if (rc < 0) {
+            break;
         }
+        tmp = rc;
         buf += tmp;
-        rc += (int)tmp;
+        total += tmp;
         prop_len -= tmp;
 
-        /* TODO: validate packet type */
+        /* TODO: Validate property type is allowed for packet type */
         (void)packet;
 
-        if (cur_prop->type < 0 ||
-            cur_prop->type >= sizeof(gPropMatrix) / sizeof(gPropMatrix[0])) {
-            return MQTT_CODE_ERROR_PROPERTY;
+        if (cur_prop->type >= sizeof(gPropMatrix) / sizeof(gPropMatrix[0])) {
+            rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PROPERTY);
+            break;
         }
 
         switch (gPropMatrix[cur_prop->type].data)
@@ -518,7 +521,7 @@ int MqttDecode_Props(MqttPacketType packet, MqttProp** props, byte* pbuf,
             {
                 cur_prop->data_byte = *buf++;
                 tmp++;
-                rc++;
+                total++;
                 prop_len--;
                 break;
             }
@@ -526,15 +529,15 @@ int MqttDecode_Props(MqttPacketType packet, MqttProp** props, byte* pbuf,
             {
                 tmp = MqttDecode_Num(buf, &cur_prop->data_short);
                 buf += tmp;
-                rc += (int)tmp;
-                prop_len -= tmp;
+                total += tmp;
+                prop_len -= (word32)tmp;
                 break;
             }
             case MQTT_DATA_TYPE_INT:
             {
                 tmp = MqttDecode_Int(buf, &cur_prop->data_int);
                 buf += tmp;
-                rc += (int)tmp;
+                total += tmp;
                 prop_len -= tmp;
                 break;
             }
@@ -543,21 +546,27 @@ int MqttDecode_Props(MqttPacketType packet, MqttProp** props, byte* pbuf,
                 tmp = MqttDecode_String(buf,
                         (const char**)&cur_prop->data_str.str,
                         &cur_prop->data_str.len);
-                buf += tmp;
-                rc += (int)tmp;
-                prop_len -= tmp;
+                if (cur_prop->data_str.len <= (buf_len - (buf - pbuf))) {
+                    buf += tmp;
+                    total += tmp;
+                    prop_len -= (word32)tmp;
+                }
+                else {
+                    /* Invalid length */
+                    rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PROPERTY);
+                }
                 break;
             }
             case MQTT_DATA_TYPE_VAR_INT:
             {
                 tmp = MqttDecode_Vbi(buf, &cur_prop->data_int,
-                        (word32)(buf_len -(buf - pbuf)));
+                        (word32)(buf_len - (buf - pbuf)));
                 if (tmp < 0) {
                     return tmp;
                 }
                 buf += tmp;
-                rc += (int)tmp;
-                prop_len -= tmp;
+                total += tmp;
+                prop_len -= (word32)tmp;
                 break;
             }
             case MQTT_DATA_TYPE_BINARY:
@@ -566,13 +575,19 @@ int MqttDecode_Props(MqttPacketType packet, MqttProp** props, byte* pbuf,
                    followed by that number of bytes */
                 tmp = MqttDecode_Num(buf, &cur_prop->data_bin.len);
                 buf += tmp;
-                rc += (int)tmp;
+                total += tmp;
                 prop_len -= tmp;
 
-                cur_prop->data_bin.data = buf;
-                buf += cur_prop->data_bin.len;
-                rc += (int)cur_prop->data_bin.len;
-                prop_len -= cur_prop->data_bin.len;
+                if (cur_prop->data_bin.len <= (buf_len - (buf - pbuf))) {
+                    cur_prop->data_bin.data = buf;
+                    buf += cur_prop->data_bin.len;
+                    total += (int)cur_prop->data_bin.len;
+                    prop_len -= cur_prop->data_bin.len;
+                }
+                else {
+                    /* Invalid length */
+                    rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PROPERTY);
+                }
                 break;
             }
             case MQTT_DATA_TYPE_STRING_PAIR:
@@ -582,26 +597,53 @@ int MqttDecode_Props(MqttPacketType packet, MqttProp** props, byte* pbuf,
                 tmp = MqttDecode_String(buf,
                         (const char**)&cur_prop->data_str.str,
                         &cur_prop->data_str.len);
-                buf += tmp;
-                rc += (int)tmp;
-                prop_len -= tmp;
+                if (cur_prop->data_str.len <=
+                    (buf_len - (buf - pbuf))) {
+                    buf += tmp;
+                    total += tmp;
+                    prop_len -= (word32)tmp;
 
-                tmp = MqttDecode_String(buf,
-                        (const char**)&cur_prop->data_str2.str,
-                        &cur_prop->data_str2.len);
-                buf += tmp;
-                rc += (int)tmp;
-                prop_len -= tmp;
+                    tmp = MqttDecode_String(buf,
+                            (const char**)&cur_prop->data_str2.str,
+                            &cur_prop->data_str2.len);
+                    if (cur_prop->data_str2.len <=
+                        (buf_len - (buf - pbuf))) {
+                        buf += tmp;
+                        total += tmp;
+                        prop_len -= (word32)tmp;
+                    }
+                    else {
+                        /* Invalid length */
+                        rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PROPERTY);
+                    }
+                }
+                else {
+                    /* Invalid length */
+                    rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PROPERTY);
+                }
                 break;
             }
             case MQTT_DATA_TYPE_NONE:
+                PRINTF("DATA TYPE NONE");
+                break;
             default:
             {
-                /* Do nothing */
+                PRINTF("INVALID DATA TYPE");
+                /* Invalid property data type */
+                rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PROPERTY);
                 break;
             }
         }
     };
+
+    if (rc < 0) {
+        /* Free the property */
+        MqttProps_Free(*props);
+        *props = NULL;
+    }
+    else {
+        rc = total;
+    }
 
     return rc;
 }
@@ -619,7 +661,7 @@ int MqttEncode_Connect(byte *tx_buf, int tx_buf_len, MqttConnect *mc_connect)
 
     /* Validate required arguments */
     if (tx_buf == NULL || mc_connect == NULL || mc_connect->client_id == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Determine packet length */
@@ -645,7 +687,7 @@ int MqttEncode_Connect(byte *tx_buf, int tx_buf_len, MqttConnect *mc_connect)
             (mc_connect->lwt_msg->buffer == NULL &&
              mc_connect->lwt_msg->total_len != 0))
         {
-            return MQTT_CODE_ERROR_BAD_ARG;
+            return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
         }
 
         remain_len += (int)XSTRLEN(mc_connect->lwt_msg->topic_name);
@@ -678,7 +720,7 @@ int MqttEncode_Connect(byte *tx_buf, int tx_buf_len, MqttConnect *mc_connect)
     }
     /* Check for buffer room */
     if (tx_buf_len < header_len + remain_len) {
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
     tx_payload = &tx_buf[header_len];
 
@@ -761,7 +803,7 @@ int MqttDecode_ConnectAck(byte *rx_buf, int rx_buf_len,
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
@@ -819,14 +861,14 @@ int MqttEncode_Publish(byte *tx_buf, int tx_buf_len, MqttPublish *publish,
 
     /* Validate required arguments */
     if (tx_buf == NULL || publish == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Determine packet length */
     variable_len = (int)XSTRLEN(publish->topic_name) + MQTT_DATA_LEN_SIZE;
     if (publish->qos > MQTT_QOS_0) {
         if (publish->packet_id == 0) {
-            return MQTT_CODE_ERROR_PACKET_ID;
+            return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_ID);
         }
         variable_len += MQTT_DATA_LEN_SIZE; /* For packet_id */
     }
@@ -865,7 +907,7 @@ int MqttEncode_Publish(byte *tx_buf, int tx_buf_len, MqttPublish *publish,
 
     /* Check for buffer room */
     if (tx_buf_len < header_len + variable_len) {
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     /* Encode variable header */
@@ -880,7 +922,7 @@ int MqttEncode_Publish(byte *tx_buf, int tx_buf_len, MqttPublish *publish,
         tx_payload += MqttEncode_Vbi(tx_payload, props_len);
 
         /* Encode properties */
-        tx_payload += MqttEncode_Props((MqttPacketType)publish->type, 
+        tx_payload += MqttEncode_Props((MqttPacketType)publish->type,
             publish->props, tx_payload);
     }
 #endif
@@ -889,7 +931,7 @@ int MqttEncode_Publish(byte *tx_buf, int tx_buf_len, MqttPublish *publish,
     if (payload_len > 0) {
         /* Check for buffer room */
         if (tx_buf_len < header_len + variable_len) {
-            return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+            return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
         }
         /* Determine max size to copy into tx_payload */
         if (payload_len > (tx_buf_len - (header_len + variable_len))) {
@@ -920,7 +962,7 @@ int MqttDecode_Publish(byte *rx_buf, int rx_buf_len, MqttPublish *publish)
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0 || publish == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
@@ -940,19 +982,20 @@ int MqttDecode_Publish(byte *rx_buf, int rx_buf_len, MqttPublish *publish)
         rx_payload += variable_len;
     }
     else {
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     /* If QoS > 0 then get packet Id */
     if (publish->qos > MQTT_QOS_0) {
-        if (rx_payload - rx_buf + MQTT_DATA_LEN_SIZE > rx_buf_len)
-            return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        if (rx_payload - rx_buf + MQTT_DATA_LEN_SIZE > rx_buf_len) {
+            return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
+        }
         variable_len += MqttDecode_Num(rx_payload, &publish->packet_id);
         if (variable_len + header_len <= rx_buf_len) {
             rx_payload += MQTT_DATA_LEN_SIZE;
         }
         else {
-            return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+            return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
         }
     }
 
@@ -980,7 +1023,7 @@ int MqttDecode_Publish(byte *rx_buf, int rx_buf_len, MqttPublish *publish)
             }
         }
         else {
-            return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+            return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
         }
     }
 #endif
@@ -1015,26 +1058,27 @@ int MqttEncode_PublishResp(byte* tx_buf, int tx_buf_len, byte type,
 
     /* Validate required arguments */
     if (tx_buf == NULL || publish_resp == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Determine packet length */
     remain_len = MQTT_DATA_LEN_SIZE; /* For packet_id */
 
 #ifdef WOLFMQTT_V5
-    if ((publish_resp->protocol_level >= MQTT_CONNECT_PROTOCOL_LEVEL_5) &&
-        ((publish_resp->reason_code != MQTT_REASON_SUCCESS) ||
-         (publish_resp->props != NULL)))
+    if (publish_resp->protocol_level >= MQTT_CONNECT_PROTOCOL_LEVEL_5)
     {
-        /* Reason Code */
-        remain_len++;
+        if (publish_resp->reason_code != MQTT_REASON_SUCCESS) {
+            /* Reason Code */
+            remain_len++;
+        }
+        if (publish_resp->props != NULL) {
+            /* Determine length of properties */
+            remain_len += props_len = MqttEncode_Props((MqttPacketType)type,
+                            publish_resp->props, NULL);
 
-        /* Determine length of properties */
-        remain_len += props_len = MqttEncode_Props((MqttPacketType)type,
-                        publish_resp->props, NULL);
-
-        /* Determine the length of the "property length" */
-        remain_len += MqttEncode_Vbi(NULL, props_len);
+            /* Determine the length of the "property length" */
+            remain_len += MqttEncode_Vbi(NULL, props_len);
+        }
     }
 #endif
 
@@ -1049,7 +1093,7 @@ int MqttEncode_PublishResp(byte* tx_buf, int tx_buf_len, byte type,
     }
     /* Check for buffer room */
     if (tx_buf_len < header_len + remain_len) {
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
     tx_payload = &tx_buf[header_len];
 
@@ -1057,19 +1101,20 @@ int MqttEncode_PublishResp(byte* tx_buf, int tx_buf_len, byte type,
     tx_payload += MqttEncode_Num(&tx_buf[header_len], publish_resp->packet_id);
 
 #ifdef WOLFMQTT_V5
-    if ((publish_resp->protocol_level >= MQTT_CONNECT_PROTOCOL_LEVEL_5) &&
-        ((publish_resp->reason_code != MQTT_REASON_SUCCESS) ||
-         (publish_resp->props != NULL)))
+    if (publish_resp->protocol_level >= MQTT_CONNECT_PROTOCOL_LEVEL_5)
     {
-        /* Encode the Reason Code */
-        *tx_payload++ = publish_resp->reason_code;
+        if (publish_resp->reason_code != MQTT_REASON_SUCCESS) {
+            /* Encode the Reason Code */
+            *tx_payload++ = publish_resp->reason_code;
+        }
+        if (publish_resp->props != NULL) {
+            /* Encode the property length */
+            tx_payload += MqttEncode_Vbi(tx_payload, props_len);
 
-        /* Encode the property length */
-        tx_payload += MqttEncode_Vbi(tx_payload, props_len);
-
-        /* Encode properties */
-        tx_payload += MqttEncode_Props((MqttPacketType)type,
-                        publish_resp->props, tx_payload);
+            /* Encode properties */
+            tx_payload += MqttEncode_Props((MqttPacketType)type,
+                            publish_resp->props, tx_payload);
+        }
     }
 #endif
 
@@ -1087,7 +1132,7 @@ int MqttDecode_PublishResp(byte* rx_buf, int rx_buf_len, byte type,
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
@@ -1103,38 +1148,42 @@ int MqttDecode_PublishResp(byte* rx_buf, int rx_buf_len, byte type,
         rx_payload += MqttDecode_Num(rx_payload, &publish_resp->packet_id);
 
 #ifdef WOLFMQTT_V5
-        if ((publish_resp->protocol_level >= MQTT_CONNECT_PROTOCOL_LEVEL_5) &&
-            (remain_len > MQTT_DATA_LEN_SIZE)) {
-            word32 props_len = 0;
-            int tmp;
+        if (publish_resp->protocol_level >= MQTT_CONNECT_PROTOCOL_LEVEL_5) {
+            if (remain_len > MQTT_DATA_LEN_SIZE) {
+                /* Decode the Reason Code */
+                publish_resp->reason_code = *rx_payload++;
+            }
+            else {
+                publish_resp->reason_code = MQTT_REASON_SUCCESS;
+            }
 
-            /* Decode the Reason Code */
-            publish_resp->reason_code = *rx_payload++;
+            if (remain_len > MQTT_DATA_LEN_SIZE+1) {
+                word32 props_len = 0;
+                int tmp;
 
-            /* Decode Length of Properties */
-            tmp = MqttDecode_Vbi(rx_payload, &props_len,
-                    (word32)(rx_buf_len - (rx_payload - rx_buf)));
-            if (tmp < 0)
-                return tmp;
+                /* Decode Length of Properties */
+                tmp = MqttDecode_Vbi(rx_payload, &props_len,
+                        (word32)(rx_buf_len - (rx_payload - rx_buf)));
+                if (tmp < 0)
+                    return tmp;
 
-            if (props_len <= (word32)(rx_buf_len - (rx_payload - rx_buf))) {
-                rx_payload += tmp;
-                if (props_len > 0) {
-                    /* Decode the Properties */
-                    tmp = MqttDecode_Props((MqttPacketType)type,
+                if (props_len <= (word32)(rx_buf_len - (rx_payload - rx_buf))) {
+                    rx_payload += tmp;
+                    if (props_len > 0) {
+                        /* Decode the Properties */
+                        tmp = MqttDecode_Props((MqttPacketType)type,
                                 &publish_resp->props, rx_payload,
                                 (word32)(rx_buf_len - (rx_payload - rx_buf)),
                                 props_len);
-                    if (tmp < 0)
-                        return tmp;
-                    rx_payload += tmp;
+                        if (tmp < 0)
+                            return tmp;
+                        rx_payload += tmp;
+                    }
+                }
+                else {
+                    return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
                 }
             }
-            else
-                return MQTT_CODE_ERROR_OUT_OF_BUFFER;
-        }
-        else {
-            publish_resp->reason_code = MQTT_REASON_SUCCESS;
         }
 #endif
     }
@@ -1157,7 +1206,7 @@ int MqttEncode_Subscribe(byte *tx_buf, int tx_buf_len,
 
     /* Validate required arguments */
     if (tx_buf == NULL || subscribe == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Determine packet length */
@@ -1170,7 +1219,7 @@ int MqttEncode_Subscribe(byte *tx_buf, int tx_buf_len,
         }
         else {
             /* Topic count is invalid */
-            return MQTT_CODE_ERROR_BAD_ARG;
+            return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
         }
     }
 #ifdef WOLFMQTT_V5
@@ -1193,7 +1242,7 @@ int MqttEncode_Subscribe(byte *tx_buf, int tx_buf_len,
     }
     /* Check for buffer room */
     if (tx_buf_len < header_len + remain_len) {
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
     tx_payload = &tx_buf[header_len];
 
@@ -1215,7 +1264,10 @@ int MqttEncode_Subscribe(byte *tx_buf, int tx_buf_len,
     for (i = 0; i < subscribe->topic_count; i++) {
         topic = &subscribe->topics[i];
         tx_payload += MqttEncode_String(tx_payload, topic->topic_filter);
-        *tx_payload = topic->qos;
+        /* Sanity check for compilers */
+        if (tx_payload != NULL) {
+            *tx_payload = topic->qos;
+        }
         tx_payload++;
     }
 
@@ -1231,7 +1283,7 @@ int MqttDecode_SubscribeAck(byte* rx_buf, int rx_buf_len,
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0 || subscribe_ack == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
@@ -1271,12 +1323,16 @@ int MqttDecode_SubscribeAck(byte* rx_buf, int rx_buf_len,
                     rx_payload += tmp;
                 }
             }
-            else
-                return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+            else {
+                return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
+            }
         }
 #endif
 
-        subscribe_ack->return_codes = rx_payload; /* List of return codes */
+        /* payload is list of return codes (MqttSubscribeAckReturnCodes) */
+        if (remain_len > MAX_MQTT_TOPICS)
+            remain_len = MAX_MQTT_TOPICS;
+        XMEMCPY(subscribe_ack->return_codes, rx_payload, remain_len);
     }
 
     /* Return total length of packet */
@@ -1295,7 +1351,7 @@ int MqttEncode_Unsubscribe(byte *tx_buf, int tx_buf_len,
 
     /* Validate required arguments */
     if (tx_buf == NULL || unsubscribe == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Determine packet length */
@@ -1308,7 +1364,7 @@ int MqttEncode_Unsubscribe(byte *tx_buf, int tx_buf_len,
         }
         else {
             /* Topic count is invalid */
-            return MQTT_CODE_ERROR_BAD_ARG;
+            return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
         }
     }
 #ifdef WOLFMQTT_V5
@@ -1330,7 +1386,7 @@ int MqttEncode_Unsubscribe(byte *tx_buf, int tx_buf_len,
     }
     /* Check for buffer room */
     if (tx_buf_len < header_len + remain_len) {
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
     tx_payload = &tx_buf[header_len];
 
@@ -1366,7 +1422,7 @@ int MqttDecode_UnsubscribeAck(byte *rx_buf, int rx_buf_len,
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0 || unsubscribe_ack == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
@@ -1405,8 +1461,9 @@ int MqttDecode_UnsubscribeAck(byte *rx_buf, int rx_buf_len,
                         rx_payload += tmp;
                     }
                 }
-                else
-                    return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+                else {
+                    return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
+                }
             }
 
             /* Reason codes are stored in the payload */
@@ -1426,7 +1483,7 @@ int MqttEncode_Ping(byte *tx_buf, int tx_buf_len, MqttPing* ping)
 
     /* Validate required arguments */
     if (tx_buf == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Encode fixed header */
@@ -1450,7 +1507,7 @@ int MqttDecode_Ping(byte *rx_buf, int rx_buf_len, MqttPing* ping)
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
@@ -1479,24 +1536,27 @@ int MqttEncode_Disconnect(byte *tx_buf, int tx_buf_len,
 
     /* Validate required arguments */
     if (tx_buf == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
 #ifdef WOLFMQTT_V5
     if ((disconnect != NULL) &&
-        (disconnect->protocol_level >= MQTT_CONNECT_PROTOCOL_LEVEL_5) &&
-        ((disconnect->reason_code != MQTT_REASON_SUCCESS) ||
-         (disconnect->props != NULL)))
-    {
-        /* Length of Reason Code */
-        remain_len++;
+        (disconnect->protocol_level >= MQTT_CONNECT_PROTOCOL_LEVEL_5)) {
 
-        /* Determine length of properties */
-        remain_len += props_len = MqttEncode_Props(MQTT_PACKET_TYPE_DISCONNECT,
-                                    disconnect->props, NULL);
+        if (disconnect->props != NULL) {
+            /* Determine length of properties */
+            remain_len += props_len = MqttEncode_Props(
+                                        MQTT_PACKET_TYPE_DISCONNECT,
+                                        disconnect->props, NULL);
 
-        /* Determine the length of the "property length" */
-        remain_len += MqttEncode_Vbi(NULL, props_len);
+            /* Determine the length of the "property length" */
+            remain_len += MqttEncode_Vbi(NULL, props_len);
+        }
+        if ((remain_len != 0) ||
+            (disconnect->reason_code != MQTT_REASON_SUCCESS)) {
+            /* Length of Reason Code */
+            remain_len++;
+        }
     }
 #endif
 
@@ -1508,27 +1568,27 @@ int MqttEncode_Disconnect(byte *tx_buf, int tx_buf_len,
     }
     /* Check for buffer room */
     if (tx_buf_len < header_len + remain_len) {
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
 #ifdef WOLFMQTT_V5
     if ((disconnect != NULL) &&
-        (disconnect->protocol_level >= MQTT_CONNECT_PROTOCOL_LEVEL_5) &&
-        ((disconnect->reason_code != MQTT_REASON_SUCCESS) ||
-         (disconnect->props != NULL)))
-    {
+        (disconnect->protocol_level >= MQTT_CONNECT_PROTOCOL_LEVEL_5)) {
         byte* tx_payload = &tx_buf[header_len];
+        if ((remain_len != 0) ||
+            (disconnect->reason_code != MQTT_REASON_SUCCESS)) {
+            /* Encode the Reason Code */
+            *tx_payload++ = disconnect->reason_code;
+        }
 
-        /* Encode the Reason Code */
-        *tx_payload++ = disconnect->reason_code;
+        if (disconnect->props != NULL) {
+            /* Encode the property length */
+            tx_payload += MqttEncode_Vbi(tx_payload, props_len);
 
-        /* Encode the property length */
-        tx_payload += MqttEncode_Vbi(tx_payload, props_len);
-
-        /* Encode properties */
-        tx_payload += MqttEncode_Props(MQTT_PACKET_TYPE_CONNECT,
-                        disconnect->props, tx_payload);
-
+            /* Encode properties */
+            tx_payload += MqttEncode_Props(MQTT_PACKET_TYPE_DISCONNECT,
+                            disconnect->props, tx_payload);
+        }
         (void)tx_payload;
     }
 #else
@@ -1548,7 +1608,7 @@ int MqttDecode_Disconnect(byte *rx_buf, int rx_buf_len, MqttDisconnect *disc)
 
     /* Validate required arguments */
     if ((rx_buf == NULL) || (rx_buf_len <= 0) || (disc == NULL)) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
@@ -1583,8 +1643,9 @@ int MqttDecode_Disconnect(byte *rx_buf, int rx_buf_len, MqttDisconnect *disc)
                     rx_payload += tmp;
                 }
             }
-            else
-                return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+            else {
+                return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
+            }
         }
     }
 
@@ -1602,7 +1663,7 @@ int MqttEncode_Auth(byte *tx_buf, int tx_buf_len, MqttAuth *auth)
 
     /* Validate required arguments */
     if ((tx_buf == NULL) || (tx_buf_len <= 0) || (auth == NULL)) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Length of Reason Code */
@@ -1623,7 +1684,7 @@ int MqttEncode_Auth(byte *tx_buf, int tx_buf_len, MqttAuth *auth)
     }
     /* Check for buffer room */
     if (tx_buf_len < header_len + remain_len) {
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
     tx_payload = &tx_buf[header_len];
 
@@ -1641,7 +1702,7 @@ int MqttEncode_Auth(byte *tx_buf, int tx_buf_len, MqttAuth *auth)
                         tx_payload);
     }
     else {
-        return MQTT_CODE_ERROR_MALFORMED_DATA;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
     }
 
     (void)tx_payload;
@@ -1660,7 +1721,7 @@ int MqttDecode_Auth(byte *rx_buf, int rx_buf_len, MqttAuth *auth)
 
     /* Validate required arguments */
     if ((rx_buf == NULL) || (rx_buf_len <= 0) || (auth == NULL)) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
@@ -1684,6 +1745,9 @@ int MqttDecode_Auth(byte *rx_buf, int rx_buf_len, MqttAuth *auth)
 
         if (props_len <= (word32)(rx_buf_len - (rx_payload - rx_buf))) {
             rx_payload += tmp;
+            if ((rx_payload - rx_buf) > rx_buf_len) {
+                return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
+            }
             if (props_len > 0) {
                 /* Decode the Properties */
                 tmp = MqttDecode_Props(MQTT_PACKET_TYPE_AUTH,
@@ -1698,7 +1762,7 @@ int MqttDecode_Auth(byte *rx_buf, int rx_buf_len, MqttAuth *auth)
                 /* The Reason Code and Property Length can be omitted if the
                    Reason Code is 0x00 (Success) and there are no Properties.
                    In this case the AUTH has a Remaining Length of 0. */
-                return MQTT_CODE_ERROR_MALFORMED_DATA;
+                return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
             }
             if (auth->props != NULL) {
                 /* Must have Authentication Method */
@@ -1708,14 +1772,15 @@ int MqttDecode_Auth(byte *rx_buf, int rx_buf_len, MqttAuth *auth)
                 /* May have zero or more User Property pairs */
             }
             else {
-                return MQTT_CODE_ERROR_MALFORMED_DATA;
+                return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
             }
         }
-        else
-            return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        else {
+            return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
+        }
     }
     else {
-        return MQTT_CODE_ERROR_MALFORMED_DATA;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
     }
 
     (void)rx_payload;
@@ -1751,8 +1816,9 @@ MqttProp* MqttProps_Add(MqttProp **head)
     }
 
 #ifdef WOLFMQTT_MULTITHREAD
-    if (wm_SemLock(&clientPropStack_lock))
+    if (wm_SemLock(&clientPropStack_lock) != 0) {
         return NULL;
+    }
 #endif
 
     cur = *head;
@@ -1765,15 +1831,17 @@ MqttProp* MqttProps_Add(MqttProp **head)
 
     /* Find a free element */
     for (i = 0; i < MQTT_MAX_PROPS; i++) {
-        if (clientPropStack[i].type == 0) {
+        if (clientPropStack[i].type == MQTT_PROP_NONE) {
             /* Found one */
             new_prop = &clientPropStack[i];
             XMEMSET(new_prop, 0, sizeof(MqttProp));
+            break;
         }
     }
 
     if (new_prop != NULL) {
-        new_prop->type = MQTT_PROP_TYPE_MAX; /* placeholder until caller sets it to a real type. */
+        /* set placeholder until caller sets it to a real type */
+        new_prop->type = MQTT_PROP_TYPE_MAX;
         if (prev == NULL) {
             /* Start a new list */
             *head = new_prop;
@@ -1782,6 +1850,10 @@ MqttProp* MqttProps_Add(MqttProp **head)
             /* Add to the existing list */
             prev->next = new_prop;
         }
+    }
+    else {
+        /* Could not allocate property */
+        (void)MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PROPERTY);
     }
 
 #ifdef WOLFMQTT_MULTITHREAD
@@ -1794,19 +1866,20 @@ MqttProp* MqttProps_Add(MqttProp **head)
 /* Free properties */
 int MqttProps_Free(MqttProp *head)
 {
+    int ret = MQTT_CODE_SUCCESS;
 #ifdef WOLFMQTT_MULTITHREAD
-    if (wm_SemLock(&clientPropStack_lock))
-        return -1;
+    if ((ret = wm_SemLock(&clientPropStack_lock)) != 0) {
+        return ret;
+    }
 #endif
     while (head != NULL) {
-        head->type = (MqttPropertyType)0;
+        head->type = MQTT_PROP_NONE; /* available */
         head = head->next;
     }
 #ifdef WOLFMQTT_MULTITHREAD
-    return wm_SemUnlock(&clientPropStack_lock);
-#else
-    return 0;
+    (void)wm_SemUnlock(&clientPropStack_lock);
 #endif
+    return ret;
 }
 
 #endif /* WOLFMQTT_V5 */
@@ -1834,7 +1907,7 @@ int MqttPacket_Write(MqttClient *client, byte* tx_buf, int tx_buf_len)
     if ((client->packet_sz_max > 0) && (tx_buf_len >
         (int)client->packet_sz_max))
     {
-        rc = MQTT_CODE_ERROR_SERVER_PROP;
+        rc = MQTT_TRACE_ERROR(MQTT_CODE_ERROR_SERVER_PROP);
     }
     else
 #endif
@@ -1857,7 +1930,8 @@ int MqttPacket_Read(MqttClient *client, byte* rx_buf, int rx_buf_len,
     {
         case MQTT_PK_BEGIN:
         {
-            client->packet.header_len = 2;
+            client->read.pos = 0;
+            client->packet.header_len = MQTT_PACKET_HEADER_MIN_SIZE;
             client->packet.remain_len = 0;
 
             /* Read fix header portion */
@@ -1868,11 +1942,10 @@ int MqttPacket_Read(MqttClient *client, byte* rx_buf, int rx_buf_len,
             }
             else if (rc != client->packet.header_len) {
                 return MqttPacket_HandleNetError(client,
-                         MQTT_CODE_ERROR_NETWORK);
+                         MQTT_TRACE_ERROR(MQTT_CODE_ERROR_NETWORK));
             }
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case MQTT_PK_READ_HEAD:
         {
@@ -1895,14 +1968,14 @@ int MqttPacket_Read(MqttClient *client, byte* rx_buf, int rx_buf_len,
                 }
                 else if (rc != len) {
                     return MqttPacket_HandleNetError(client,
-                             MQTT_CODE_ERROR_NETWORK);
+                             MQTT_TRACE_ERROR(MQTT_CODE_ERROR_NETWORK));
                 }
                 client->packet.header_len += len;
             }
 
             if (i == MQTT_PACKET_MAX_LEN_BYTES) {
                 return MqttPacket_HandleNetError(client,
-                        MQTT_CODE_ERROR_MALFORMED_DATA);
+                        MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA));
             }
 
             /* Try and decode remaining length */
@@ -1918,9 +1991,8 @@ int MqttPacket_Read(MqttClient *client, byte* rx_buf, int rx_buf_len,
                 rc += sizeof(header->type_flags);
                 client->packet.header_len = rc;
             }
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case MQTT_PK_READ:
         {
@@ -1930,7 +2002,7 @@ int MqttPacket_Read(MqttClient *client, byte* rx_buf, int rx_buf_len,
 
             /* Make sure it does not overflow rx_buf */
             if (rx_buf_len < client->packet.header_len) {
-                return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+                return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
             }
             if (remain_read > rx_buf_len - client->packet.header_len) {
                 remain_read = rx_buf_len - client->packet.header_len;
@@ -2077,7 +2149,7 @@ int SN_Decode_Header(byte *rx_buf, int rx_buf_len,
     word16 total_len;
 
     if (rx_buf == NULL || rx_buf_len < MQTT_PACKET_HEADER_MIN_SIZE) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
@@ -2088,7 +2160,7 @@ int SN_Decode_Header(byte *rx_buf, int rx_buf_len,
     }
 
     if (total_len > rx_buf_len) {
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     /* Message Type */
@@ -2153,7 +2225,7 @@ int SN_Decode_Advertise(byte *rx_buf, int rx_buf_len, SN_Advertise *gw_info)
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
@@ -2162,11 +2234,11 @@ int SN_Decode_Advertise(byte *rx_buf, int rx_buf_len, SN_Advertise *gw_info)
     /* Check message type */
     type = *rx_payload++;
     if (total_len != 5) {
-        return MQTT_CODE_ERROR_MALFORMED_DATA;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
     }
 
     if (type != SN_MSG_TYPE_ADVERTISE) {
-        return MQTT_CODE_ERROR_PACKET_TYPE;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
     }
 
     /* Decode gateway info */
@@ -2191,7 +2263,7 @@ int SN_Encode_SearchGW(byte *tx_buf, int tx_buf_len, byte hops)
 
     /* Validate required arguments */
     if (tx_buf == NULL || tx_buf_len < total_len) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Encode length */
@@ -2215,7 +2287,7 @@ int SN_Decode_GWInfo(byte *rx_buf, int rx_buf_len, SN_GwInfo *gw_info)
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
@@ -2226,22 +2298,22 @@ int SN_Decode_GWInfo(byte *rx_buf, int rx_buf_len, SN_GwInfo *gw_info)
     }
 
     if (total_len > rx_buf_len) {
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
     if (total_len < 3) {
-        return MQTT_CODE_ERROR_MALFORMED_DATA;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
     }
     /* Check message type */
     type = *rx_payload++;
     if (type != SN_MSG_TYPE_GWINFO) {
-        return MQTT_CODE_ERROR_PACKET_TYPE;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
     }
 
     /* Decode gateway info */
     if (gw_info != NULL) {
         gw_info->gwId = *rx_payload++;
 
-        //TODO: validate size of gwAddr
+        /* TODO: validate size of gwAddr */
         if (total_len - 3 > 0) {
             /* The gateway address is only present if sent by a client */
             XMEMCPY(gw_info->gwAddr, rx_payload, total_len - 3);
@@ -2263,7 +2335,7 @@ int SN_Encode_Connect(byte *tx_buf, int tx_buf_len, SN_Connect *mc_connect)
     /* Validate required arguments */
     if ((tx_buf == NULL) || (mc_connect == NULL) ||
         (mc_connect->client_id == NULL) || (mc_connect->protocol_level == 0)) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Determine packet length */
@@ -2280,7 +2352,7 @@ int SN_Encode_Connect(byte *tx_buf, int tx_buf_len, SN_Connect *mc_connect)
     }
 
     if (total_len > tx_buf_len) {
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     /* Encode length */
@@ -2326,18 +2398,18 @@ int SN_Decode_WillTopicReq(byte *rx_buf, int rx_buf_len)
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Length and MsgType */
     total_len = *rx_payload++;
     if (total_len != 2) {
-        return MQTT_CODE_ERROR_MALFORMED_DATA;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
     }
 
     type = *rx_payload++;
     if (type != SN_MSG_TYPE_WILLTOPICREQ) {
-        return MQTT_CODE_ERROR_PACKET_TYPE;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
     }
     (void)rx_payload;
 
@@ -2355,7 +2427,7 @@ int SN_Encode_WillTopic(byte *tx_buf, int tx_buf_len, SN_Will *willTopic)
 
     /* Validate required arguments */
     if (tx_buf == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Length and MsgType */
@@ -2377,7 +2449,7 @@ int SN_Encode_WillTopic(byte *tx_buf, int tx_buf_len, SN_Will *willTopic)
 
     if (total_len > tx_buf_len) {
         /* Buffer too small */
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     /* Encode length */
@@ -2420,7 +2492,7 @@ int SN_Decode_WillMsgReq(byte *rx_buf, int rx_buf_len)
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
@@ -2428,13 +2500,13 @@ int SN_Decode_WillMsgReq(byte *rx_buf, int rx_buf_len)
 
     /* Length and MsgType */
     if (total_len != 2){
-        return MQTT_CODE_ERROR_MALFORMED_DATA;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
     }
 
     /* Message Type */
     type = *rx_payload++;
     if (type != SN_MSG_TYPE_WILLMSGREQ) {
-        return MQTT_CODE_ERROR_PACKET_TYPE;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
     }
     (void)rx_payload;
 
@@ -2449,7 +2521,7 @@ int SN_Encode_WillMsg(byte *tx_buf, int tx_buf_len, SN_Will *willMsg)
 
     /* Validate required arguments */
     if ((tx_buf == NULL) || (willMsg == NULL)) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Length and MsgType */
@@ -2466,7 +2538,7 @@ int SN_Encode_WillMsg(byte *tx_buf, int tx_buf_len, SN_Will *willMsg)
 
     if (total_len > tx_buf_len) {
         /* Buffer too small */
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     /* Encode length */
@@ -2498,7 +2570,7 @@ int SN_Encode_WillTopicUpdate(byte *tx_buf, int tx_buf_len, SN_Will *willTopic)
 
     /* Validate required arguments */
     if (tx_buf == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Length and MsgType */
@@ -2520,7 +2592,7 @@ int SN_Encode_WillTopicUpdate(byte *tx_buf, int tx_buf_len, SN_Will *willTopic)
 
     if (total_len > tx_buf_len) {
         /* Buffer too small */
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     /* Encode length */
@@ -2564,18 +2636,18 @@ int SN_Decode_WillTopicResponse(byte *rx_buf, int rx_buf_len, byte *ret_code)
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
     total_len = *rx_payload++;
     if (total_len != 3) {
-        return MQTT_CODE_ERROR_MALFORMED_DATA;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
     }
 
     type = *rx_payload++;
     if (type != SN_MSG_TYPE_WILLTOPICRESP) {
-        return MQTT_CODE_ERROR_PACKET_TYPE;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
     }
 
     /* Return Code */
@@ -2592,7 +2664,7 @@ int SN_Encode_WillMsgUpdate(byte *tx_buf, int tx_buf_len, SN_Will *willMsg)
 
     /* Validate required arguments */
     if ((tx_buf == NULL) || (willMsg == NULL)) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Length and MsgType */
@@ -2609,7 +2681,7 @@ int SN_Encode_WillMsgUpdate(byte *tx_buf, int tx_buf_len, SN_Will *willMsg)
 
     if (total_len > tx_buf_len) {
         /* Buffer too small */
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     /* Encode length */
@@ -2641,18 +2713,18 @@ int SN_Decode_WillMsgResponse(byte *rx_buf, int rx_buf_len, byte *ret_code)
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
     total_len = *rx_payload++;
     if (total_len != 3) {
-        return MQTT_CODE_ERROR_MALFORMED_DATA;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
     }
 
     type = *rx_payload++;
     if (type != SN_MSG_TYPE_WILLMSGRESP) {
-        return MQTT_CODE_ERROR_PACKET_TYPE;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
     }
 
     /* Return Code */
@@ -2670,18 +2742,18 @@ int SN_Decode_ConnectAck(byte *rx_buf, int rx_buf_len,
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
     total_len = *rx_payload++;
     if (total_len != 3) {
-        return MQTT_CODE_ERROR_MALFORMED_DATA;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
     }
 
     type = *rx_payload++;
     if (type != SN_MSG_TYPE_CONNACK) {
-        return MQTT_CODE_ERROR_PACKET_TYPE;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
     }
 
     /* Decode variable header */
@@ -2701,7 +2773,7 @@ int SN_Encode_Register(byte *tx_buf, int tx_buf_len, SN_Register *regist)
 
     /* Validate required arguments */
     if (tx_buf == NULL || regist == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Determine packet length */
@@ -2718,7 +2790,7 @@ int SN_Encode_Register(byte *tx_buf, int tx_buf_len, SN_Register *regist)
 
     if (total_len > tx_buf_len) {
         /* Buffer too small */
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     /* Encode length */
@@ -2757,7 +2829,7 @@ int SN_Decode_Register(byte *rx_buf, int rx_buf_len, SN_Register *regist)
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
@@ -2768,16 +2840,16 @@ int SN_Decode_Register(byte *rx_buf, int rx_buf_len, SN_Register *regist)
     }
 
     if (total_len > rx_buf_len) {
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
     if (total_len < 7) {
-        return MQTT_CODE_ERROR_MALFORMED_DATA;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
     }
 
     /* Check message type */
     type = *rx_payload++;
     if (type != SN_MSG_TYPE_REGISTER) {
-        return MQTT_CODE_ERROR_PACKET_TYPE;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
     }
 
     if (regist != NULL) {
@@ -2806,7 +2878,7 @@ int SN_Encode_RegAck(byte *tx_buf, int tx_buf_len, SN_RegAck *regack)
 
     /* Validate required arguments */
     if (tx_buf == NULL || regack == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Determine packet length */
@@ -2815,7 +2887,7 @@ int SN_Encode_RegAck(byte *tx_buf, int tx_buf_len, SN_RegAck *regack)
 
     if (total_len > tx_buf_len) {
         /* Buffer too small */
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     tx_payload = tx_buf;
@@ -2847,18 +2919,18 @@ int SN_Decode_RegAck(byte *rx_buf, int rx_buf_len, SN_RegAck *regack)
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
     total_len = *rx_payload++;
     if (total_len != 7) {
-        return MQTT_CODE_ERROR_MALFORMED_DATA;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
     }
 
     type = *rx_payload++;
     if (type != SN_MSG_TYPE_REGACK) {
-        return MQTT_CODE_ERROR_PACKET_TYPE;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
     }
 
     if (regack != NULL) {
@@ -2884,12 +2956,11 @@ int SN_Encode_Subscribe(byte *tx_buf, int tx_buf_len, SN_Subscribe *subscribe)
 
     /* Validate required arguments */
     if (tx_buf == NULL || subscribe == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Determine packet length */
-    if ((subscribe->topic_type & SN_PACKET_FLAG_TOPICIDTYPE_MASK) ==
-            SN_TOPIC_ID_TYPE_NORMAL) {
+    if (subscribe->topic_type == SN_TOPIC_ID_TYPE_NORMAL) {
         /* Topic name is a string */
         total_len = (int)XSTRLEN(subscribe->topicNameId);
     }
@@ -2908,7 +2979,7 @@ int SN_Encode_Subscribe(byte *tx_buf, int tx_buf_len, SN_Subscribe *subscribe)
 
     if (total_len > tx_buf_len) {
         /* Buffer too small */
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     /* Encode length */
@@ -2938,8 +3009,7 @@ int SN_Encode_Subscribe(byte *tx_buf, int tx_buf_len, SN_Subscribe *subscribe)
     tx_payload += MqttEncode_Num(tx_payload, subscribe->packet_id);
 
     /* Encode topic */
-    if ((subscribe->topic_type & SN_PACKET_FLAG_TOPICIDTYPE_MASK) ==
-            SN_TOPIC_ID_TYPE_NORMAL) {
+    if (subscribe->topic_type == SN_TOPIC_ID_TYPE_NORMAL) {
         /* Topic name is a string */
         XMEMCPY(tx_payload, subscribe->topicNameId, XSTRLEN(subscribe->topicNameId));
     }
@@ -2961,18 +3031,18 @@ int SN_Decode_SubscribeAck(byte* rx_buf, int rx_buf_len,
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
     total_len = *rx_payload++;
     if (total_len != 8) {
-        return MQTT_CODE_ERROR_MALFORMED_DATA;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
     }
 
     type = *rx_payload++;
     if (type != SN_MSG_TYPE_SUBACK) {
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     /* Decode SubAck fields */
@@ -2996,7 +3066,7 @@ int SN_Encode_Publish(byte *tx_buf, int tx_buf_len, SN_Publish *publish)
 
     /* Validate required arguments */
     if (tx_buf == NULL || publish == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Determine packet length */
@@ -3012,7 +3082,7 @@ int SN_Encode_Publish(byte *tx_buf, int tx_buf_len, SN_Publish *publish)
 
     if (total_len > tx_buf_len) {
         /* Buffer too small */
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     /* Encode header */
@@ -3038,8 +3108,9 @@ int SN_Encode_Publish(byte *tx_buf, int tx_buf_len, SN_Publish *publish)
     *tx_payload++ = flags;
 
     /* Encode topic */
-    if (publish->topic_type == SN_TOPIC_ID_TYPE_SHORT) {
-        /* Short topic name is 2 chars */
+    if ((publish->topic_type == SN_TOPIC_ID_TYPE_SHORT) ||
+        (publish->topic_type == SN_TOPIC_ID_TYPE_PREDEF)) {
+        /* Short and predefined topic names are 2 chars */
         XMEMCPY(tx_payload, publish->topic_name, 2);
         tx_payload += 2;
     }
@@ -3068,7 +3139,7 @@ int SN_Decode_Publish(byte *rx_buf, int rx_buf_len, SN_Publish *publish)
 
     /* Validate required arguments */
     if (rx_buf == NULL || publish == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
@@ -3079,17 +3150,17 @@ int SN_Decode_Publish(byte *rx_buf, int rx_buf_len, SN_Publish *publish)
     }
 
     if (total_len > rx_buf_len) {
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     if (total_len < 7) {
-        return MQTT_CODE_ERROR_MALFORMED_DATA;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
     }
 
     /* Message Type */
     type = *rx_payload++;
     if (type != SN_MSG_TYPE_PUBLISH) {
-        return MQTT_CODE_ERROR_PACKET_TYPE;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
     }
 
     flags = *rx_payload++;
@@ -3129,14 +3200,14 @@ int SN_Encode_PublishResp(byte* tx_buf, int tx_buf_len, byte type,
 
     /* Validate required arguments */
     if (tx_buf == NULL || publish_resp == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Determine packet length */
     total_len = (type == SN_MSG_TYPE_PUBACK) ? 7 : 4;
 
     if (total_len > tx_buf_len)
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
 
     /* Encode */
     *tx_payload++ = (byte)total_len;
@@ -3166,7 +3237,7 @@ int SN_Decode_PublishResp(byte* rx_buf, int rx_buf_len, byte type,
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode */
@@ -3174,13 +3245,13 @@ int SN_Decode_PublishResp(byte* rx_buf, int rx_buf_len, byte type,
 
     if(total_len > rx_buf_len) {
         /* Buffer too small */
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     /* Validate packet type */
     rec_type = *rx_payload++;
     if (rec_type != type) {
-        return MQTT_CODE_ERROR_PACKET_TYPE;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
     }
 
     if (publish_resp) {
@@ -3208,12 +3279,11 @@ int SN_Encode_Unsubscribe(byte *tx_buf, int tx_buf_len,
 
     /* Validate required arguments */
     if (tx_buf == NULL || unsubscribe == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Determine packet length */
-    if ((unsubscribe->topic_type & SN_PACKET_FLAG_TOPICIDTYPE_MASK) ==
-            SN_TOPIC_ID_TYPE_NORMAL) {
+    if (unsubscribe->topic_type == SN_TOPIC_ID_TYPE_NORMAL) {
         /* Topic name is a string */
         total_len = (int)XSTRLEN(unsubscribe->topicNameId);
     }
@@ -3232,7 +3302,7 @@ int SN_Encode_Unsubscribe(byte *tx_buf, int tx_buf_len,
 
     if (total_len > tx_buf_len) {
         /* Buffer too small */
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     /* Encode header */
@@ -3260,8 +3330,7 @@ int SN_Encode_Unsubscribe(byte *tx_buf, int tx_buf_len,
     tx_payload += MqttEncode_Num(tx_payload, unsubscribe->packet_id);
 
     /* Encode topic */
-    if ((unsubscribe->topic_type & SN_PACKET_FLAG_TOPICIDTYPE_MASK) ==
-            SN_TOPIC_ID_TYPE_NORMAL) {
+    if (unsubscribe->topic_type == SN_TOPIC_ID_TYPE_NORMAL) {
         /* Topic name is a string */
         XMEMCPY(tx_payload, unsubscribe->topicNameId,
                 XSTRLEN(unsubscribe->topicNameId));
@@ -3285,18 +3354,18 @@ int SN_Decode_UnsubscribeAck(byte *rx_buf, int rx_buf_len,
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
     total_len = *rx_payload++;
     if (total_len != 4) {
-        return MQTT_CODE_ERROR_MALFORMED_DATA;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
     }
 
     type = *rx_payload++;
     if (type != SN_MSG_TYPE_UNSUBACK) {
-        return MQTT_CODE_ERROR_PACKET_TYPE;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
     }
 
     /* Decode SubAck fields */
@@ -3317,7 +3386,7 @@ int SN_Encode_Disconnect(byte *tx_buf, int tx_buf_len,
 
     /* Validate required arguments */
     if (tx_buf == NULL) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     if ((disconnect != NULL) && (disconnect->sleepTmr > 0)) {
@@ -3325,7 +3394,7 @@ int SN_Encode_Disconnect(byte *tx_buf, int tx_buf_len,
     }
 
     if (total_len > tx_buf_len) {
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     /* Encode message */
@@ -3349,18 +3418,18 @@ int SN_Decode_Disconnect(byte *rx_buf, int rx_buf_len)
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     /* Decode fixed header */
     total_len = *rx_payload++;
     if (total_len != 2) {
-        return MQTT_CODE_ERROR_MALFORMED_DATA;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
     }
 
     type = *rx_payload++;
     if (type != SN_MSG_TYPE_DISCONNECT) {
-        return MQTT_CODE_ERROR_PACKET_TYPE;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
     }
 
     (void)rx_payload;
@@ -3377,7 +3446,7 @@ int SN_Encode_Ping(byte *tx_buf, int tx_buf_len, SN_PingReq *ping, byte type)
     /* Validate required arguments */
     if ((tx_buf == NULL) ||
         ((type != SN_MSG_TYPE_PING_REQ) && (type != SN_MSG_TYPE_PING_RESP))) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     if ((type == SN_MSG_TYPE_PING_REQ) && (ping != NULL) &&
@@ -3386,7 +3455,7 @@ int SN_Encode_Ping(byte *tx_buf, int tx_buf_len, SN_PingReq *ping, byte type)
     }
 
     if (total_len > tx_buf_len) {
-        return MQTT_CODE_ERROR_OUT_OF_BUFFER;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_OUT_OF_BUFFER);
     }
 
     *tx_payload++ = (byte)total_len;
@@ -3410,18 +3479,18 @@ int SN_Decode_Ping(byte *rx_buf, int rx_buf_len)
 
     /* Validate required arguments */
     if (rx_buf == NULL || rx_buf_len <= 0) {
-        return MQTT_CODE_ERROR_BAD_ARG;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_BAD_ARG);
     }
 
     total_len = *rx_payload++;
     if (total_len != 2) {
-        return MQTT_CODE_ERROR_MALFORMED_DATA;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_MALFORMED_DATA);
     }
 
     type = *rx_payload++;
     if ((type != SN_MSG_TYPE_PING_REQ) &&
         (type != SN_MSG_TYPE_PING_RESP)) {
-        return MQTT_CODE_ERROR_PACKET_TYPE;
+        return MQTT_TRACE_ERROR(MQTT_CODE_ERROR_PACKET_TYPE);
     }
 
     /* Return total length of packet */
@@ -3446,7 +3515,7 @@ int SN_Packet_Read(MqttClient *client, byte* rx_buf, int rx_buf_len,
             }
             else if (rc != 2) {
                 return MqttPacket_HandleNetError(client,
-                         MQTT_CODE_ERROR_NETWORK);
+                         MQTT_TRACE_ERROR(MQTT_CODE_ERROR_NETWORK));
             }
 
             len = rc;
@@ -3459,7 +3528,7 @@ int SN_Packet_Read(MqttClient *client, byte* rx_buf, int rx_buf_len,
                 }
                 else if (rc != 4) {
                     return MqttPacket_HandleNetError(client,
-                             MQTT_CODE_ERROR_NETWORK);
+                             MQTT_TRACE_ERROR(MQTT_CODE_ERROR_NETWORK));
                 }
 
                 len = rc;
@@ -3471,16 +3540,14 @@ int SN_Packet_Read(MqttClient *client, byte* rx_buf, int rx_buf_len,
                 total_len = rx_buf[0];
                 client->packet.header_len = len;
             }
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case MQTT_PK_READ_HEAD:
         {
             client->packet.stat = MQTT_PK_READ_HEAD;
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case MQTT_PK_READ:
         {

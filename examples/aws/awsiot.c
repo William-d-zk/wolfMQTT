@@ -1,6 +1,6 @@
 /* awsiot.c
  *
- * Copyright (C) 2006-2020 wolfSSL Inc.
+ * Copyright (C) 2006-2022 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -199,7 +199,10 @@ static int mqtt_aws_tls_cb(MqttClient* client)
 {
     int rc = WOLFSSL_FAILURE;
 
-    client->tls.ctx = wolfSSL_CTX_new(wolfTLSv1_2_client_method());
+    /* Use highest available and allow downgrade. If wolfSSL is built with
+     * old TLS support, it is possible for a server to force a downgrade to
+     * an insecure version. */
+    client->tls.ctx = wolfSSL_CTX_new(wolfSSLv23_client_method());
     if (client->tls.ctx) {
         wolfSSL_CTX_set_verify(client->tls.ctx, WOLFSSL_VERIFY_PEER,
                                mqtt_aws_tls_verify_cb);
@@ -256,8 +259,8 @@ static int mqtt_message_cb(MqttClient *client, MqttMessage *msg,
     }
     XMEMCPY(buf, msg->buffer, len);
     buf[len] = '\0'; /* Make sure its null terminated */
-    PRINTF("Payload (%d - %d): %s",
-        msg->buffer_pos, msg->buffer_pos + len, buf);
+    PRINTF("Payload (%d - %d) printing %d bytes:" LINE_END "%s",
+        msg->buffer_pos, msg->buffer_pos + msg->buffer_len, len, buf);
 
     if (msg_done) {
         PRINTF("MQTT Message: Done");
@@ -281,9 +284,8 @@ int awsiot_test(MQTTCtx *mqttCtx)
             if (!mqttCtx->use_tls) {
                 return MQTT_CODE_ERROR_BAD_ARG;
             }
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_NET_INIT:
         {
@@ -303,9 +305,8 @@ int awsiot_test(MQTTCtx *mqttCtx)
             /* setup tx/rx buffers */
             mqttCtx->tx_buf = (byte*)WOLFMQTT_MALLOC(MAX_BUFFER_SIZE);
             mqttCtx->rx_buf = (byte*)WOLFMQTT_MALLOC(MAX_BUFFER_SIZE);
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_INIT:
         {
@@ -330,9 +331,8 @@ int awsiot_test(MQTTCtx *mqttCtx)
             mqttCtx->client.protocol_level = MQTT_CONNECT_PROTOCOL_LEVEL_4;
         #endif
 
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_TCP_CONN:
         {
@@ -372,9 +372,8 @@ int awsiot_test(MQTTCtx *mqttCtx)
             /* Optional authentication */
             mqttCtx->connect.username = mqttCtx->username;
             mqttCtx->connect.password = mqttCtx->password;
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_MQTT_CONN:
         {
@@ -409,9 +408,8 @@ int awsiot_test(MQTTCtx *mqttCtx)
             mqttCtx->subscribe.packet_id = mqtt_get_packetid();
             mqttCtx->subscribe.topic_count = sizeof(mqttCtx->topics)/sizeof(MqttTopic);
             mqttCtx->subscribe.topics = mqttCtx->topics;
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_SUB:
         {
@@ -448,9 +446,8 @@ int awsiot_test(MQTTCtx *mqttCtx)
             mqttCtx->publish.packet_id = mqtt_get_packetid();
             mqttCtx->publish.buffer = (byte*)mqttCtx->app_ctx;
             mqttCtx->publish.total_len = (word32)XSTRLEN((char*)mqttCtx->app_ctx);
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_PUB:
         {
@@ -468,9 +465,8 @@ int awsiot_test(MQTTCtx *mqttCtx)
 
             /* Read Loop */
             PRINTF("MQTT Waiting for message...");
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_WAIT_MSG:
         {
@@ -550,9 +546,8 @@ int awsiot_test(MQTTCtx *mqttCtx)
             if (rc != MQTT_CODE_SUCCESS) {
                 goto disconn;
             }
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_DISCONNECT:
         {
@@ -566,9 +561,8 @@ int awsiot_test(MQTTCtx *mqttCtx)
             if (rc != MQTT_CODE_SUCCESS) {
                 goto disconn;
             }
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_NET_DISCONNECT:
         {
@@ -580,9 +574,8 @@ int awsiot_test(MQTTCtx *mqttCtx)
             }
             PRINTF("MQTT Socket Disconnect: %s (%d)",
                 MqttClient_ReturnCodeToString(rc), rc);
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case WMQ_DONE:
         {
@@ -592,6 +585,7 @@ int awsiot_test(MQTTCtx *mqttCtx)
         }
 
         case WMQ_UNSUB: /* not used */
+        case WMQ_PING:
         default:
             rc = MQTT_CODE_ERROR_STAT;
             goto exit;

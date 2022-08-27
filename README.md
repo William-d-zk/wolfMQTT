@@ -1,6 +1,6 @@
 # wolfMQTT
 
-This is an implementation of the MQTT Client written in C for embedded use, which supports SSL/TLS via the wolfSSL library. This library was built from the ground up to be multi-platform, space conscience and extensible. Integrates with wolfSSL to provide TLS support.
+This is an implementation of the MQTT Client written in C for embedded use, which supports SSL/TLS via the wolfSSL library. This library was built from the ground up to be multi-platform, space conscious and extensible. Integrates with wolfSSL to provide TLS support.
 
 
 ## Building
@@ -13,7 +13,7 @@ This is an implementation of the MQTT Client written in C for embedded use, whic
 4. `sudo make install`
 
 Notes:
-* If `wolfssl` was recently installed run `sudo ldconfig` to update the linker cache.
+* If `wolfssl` was recently installed, run `sudo ldconfig` to update the linker cache.
 * Debug messages can be enabled using `--enable-debug` or `--enable-debug=verbose` (for extra logging).
 * For a list of build options run `./configure --help`.
 * The build options are generated in a file here: `wolfmqtt/options.h`.
@@ -36,6 +36,22 @@ For building wolfMQTT with TLS support in Visual Studio:
 8. By default the include path for the wolfssl headers is `./../wolfssl/`. If your wolfssl root location is different you can go into the project settings and adjust this in `C/C++` -> `General` -> `Additional Include Directories`.
 9. Configure your Visual Studio build settings using `wolfmqtt/vs_settings.h`.
 10. Build the wolfMQTT solution.
+
+### CMake
+CMake supports compiling in many environments including Visual Studio
+if CMake support is installed. The commands below can be run in
+`Developer Command Prompt`.
+
+```
+mkdir build
+cd build
+# to use installed wolfSSL location (library and headers)
+cmake .. -DWITH_WOLFSSL=/prefix/to/wolfssl/install/
+# OR to use a wolfSSL source tree
+cmake .. -DWITH_WOLFSSL_TREE=/path/to/wolfssl/
+# build
+cmake --build .
+```
 
 ### Arduino
 
@@ -147,6 +163,7 @@ We setup an AWS IoT endpoint and testing device certificate for testing. The AWS
 
 ### Watson IoT Example
 This example enables the wolfMQTT client to connect to the IBM Watson Internet of Things (WIOT) Platform. The WIOT Platform has a limited test broker called "Quickstart" that allows non-secure connections to exercise the component. The example is located in `/examples/wiot/`. Works with MQTT v5 support enabled.
+**NOTE** The WIOT QuickStart broker is no longer available. The demo may still be useful for users of IBM Watson IOT.
 
 ### MQTT-SN Example
 The Sensor Network client implements the MQTT-SN protocol for low-bandwidth networks. There are several differences from MQTT, including the ability to use a two byte Topic ID instead the full topic during subscribe and publish. The SN client requires an MQTT-SN gateway. The gateway acts as an intermediary between the SN clients and the broker. This client was tested with the Eclipse Paho MQTT-SN Gateway, which connects by default to the public Eclipse broker, much like our wolfMQTT Client example. The address of the gateway must be configured as the host. The example is located in `/examples/sn-client/`.
@@ -175,17 +192,50 @@ WolfGatewayQoS-1,wolfMQTT/example/testTopic, 1
 ### Multithread Example
 This example exercises the multithreading capabilities of the client library. The client implements two tasks: one that publishes to the broker; and another that waits for messages from the broker. The publish thread is created `NUM_PUB_TASKS` times (10 by default) and sends unique messages to the broker. This feature is enabled using the `--enable-mt` configuration option. The example is located in `/examples/multithread/`.
 
+## Example Options
+The command line examples can be executed with optional parameters. To see a list of the available parameters, add the `-?`
+
+```
+ ./examples/mqttclient/mqttclient -?
+mqttclient:
+-?          Help, print this usage
+-h <host>   Host to connect to, default: test.mosquitto.org
+-p <num>    Port to connect on, default: Normal 1883, TLS 8883
+-t          Enable TLS
+-A <file>   Load CA (validate peer)
+-K <key>    Use private key (for TLS mutual auth)
+-c <cert>   Use certificate (for TLS mutual auth)
+-S <str>    Use Host Name Indication, blank defaults to host
+-q <num>    Qos Level 0-2, default: 0
+-s          Disable clean session connect flag
+-k <num>    Keep alive seconds, default: 60
+-i <id>     Client Id, default: WolfMQTTClient
+-l          Enable LWT (Last Will and Testament)
+-u <str>    Username
+-w <str>    Password
+-m <str>    Message, default: test
+-n <str>    Topic name, default: wolfMQTT/example/testTopic
+-r          Set Retain flag on publish message
+-C <num>    Command Timeout, default: 30000ms
+-P <num>    Max packet size the client will accept, default: 1048576
+-T          Test mode
+-f <file>   Use file contents for publish
+```
+The available options vary depending on the library configuration.
+
+
 ## Broker compatibility
 wolfMQTT client library has been tested with the following brokers:
 * Adafruit IO by Adafruit
 * AWS by Amazon
 * Azure by Microsoft
 * flespi by Gurtam
-* HiveMQ by dc-square GmbH
+* HiveMQ and HiveMQ Cloud by HiveMQ GmbH
 * IBM WIoTP Message Gateway by IBM
 * Mosquitto by Eclipse
 * Paho MQTT-SN Gateway by Eclipse
 * VerneMQ by VerneMQ/Erlio
+* EMQX broker
 
 ## Specification Support
 
@@ -194,7 +244,7 @@ wolfMQTT client library has been tested with the following brokers:
 The initially supported version with full specification support for all features and packets type such as:
 * QoS 0-2
 * Last Will and Testament (LWT)
-* Client examples for: AWS, Azure IoT, IBM Watson, Firmware update, non-blocking and generic.
+* Client examples for: AWS, Azure IoT, Firmware update, non-blocking and generic.
 
 ### MQTT v5.0 Specification Support
 
@@ -223,8 +273,10 @@ The v5 enabled wolfMQTT client was tested with the following MQTT v5 brokers:
 * HiveMQ 4.0.0 EAP
 ** Runs locally.
 ** `./examples/mqttclient/mqttclient -h localhost`
-* Watson IoT Quickserver
-** `./examples/wiot/wiot`
+* HiveMQ Cloud
+** `./examples/mqttclient/mqttclient -h 833f87e253304692bd2b911f0c18dba1.s1.eu.hivemq.cloud -t -S -u wolf1 -w NEZjcm7i8eRjFKF -p 8883`
+* EMQX broker
+** `./examples/mqttclient/mqttclient -h "broker.emqx.io"`
 
 ### MQTT Sensor Network (MQTT-SN) Specification Support
 
@@ -240,3 +292,45 @@ Unsupported features:
 * Multiple gateway handling
 
 The SN client was tested using the Eclipse Paho MQTT-SN Gateway (https://github.com/eclipse/paho.mqtt-sn.embedded-c) running locally and on a separate network node. Instructions for building and running the gateway are in the project README.
+
+## Post-Quantum MQTT Support
+
+Recently the OpenQuantumSafe project has integrated their fork of OpenSSL with the mosquito MQTT broker. You can now build wolfMQTT with wolfSSL and liboqs and use that to publish to the mosquito MQTT broker. Currently, wolfMQTT supports the `KYBER_LEVEL1` and `P256_KYBER_LEVEL1` groups and FALCON_LEVEL1 for authentication in TLS 1.3. This works on Linux.
+
+### Getting Started with Post-Quantum Mosquito MQTT Broker and Subscriber
+
+To get started, you can use the code from the following github pull request:
+
+https://github.com/open-quantum-safe/oqs-demos/pull/143
+
+Follow all the instructions in README.md and USAGE.md. This allows you to create a docker image and a docker network. Then you will run a broker, a subscriber and a publisher. At the end the publisher will exit and the broker and subscriber will remain active. You will need to re-activate the publisher docker instance and get the following files onto your local machine:
+
+- /test/cert/CA.crt
+- /test/cert/publisher.crt
+- /test/cert/publisher.key
+
+NOTE: Do not stop the broker and the subscriber instances.
+
+### Building and Running Post-Quantum wolfMQTT Publisher
+
+Follow the instructions for obtaining and building liboqs and building wolfSSL in section 15 of the following document:
+
+https://github.com/wolfSSL/wolfssl/blob/master/INSTALL
+
+No special flags are required for building wolfMQTT. Simply do the following:
+
+```
+./autogen.sh (if obtained from github)
+./configure
+make all
+make check
+```
+
+Since the broker and subscriber are still running, you can use `mqttclient` to publish using post-quantum algorithms in TLS 1.3 by doing the following:
+
+```
+./examples/mqttclient/mqttclient -h 172.18.0.2 -t -A CA.crt -K publisher.key -c publisher.crt -m "Hello from post-quantum wolfMQTT!!" -n test/sensor1 -Q KYBER_LEVEL1
+```
+
+Congratulations! You have just published an MQTT message using TLS 1.3 with the `KYBER_LEVEL1` KEM and `FALCON_LEVEL1` signature scheme. To use the hybrid group, replace `KYBER_LEVEL1` with `P256_KYBER_LEVEL1`.
+

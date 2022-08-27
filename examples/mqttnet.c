@@ -1,6 +1,6 @@
 /* mqttnet.c
  *
- * Copyright (C) 2006-2020 wolfSSL Inc.
+ * Copyright (C) 2006-2022 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -38,6 +38,16 @@
 
     #define SOCKET_T                     Socket_t
     #define SOCK_ADDR_IN                 struct freertos_sockaddr
+
+/* ToppersOS and LWIP */
+#elif defined(TOPPERS) && defined(WOLFSSL_LWIP)
+    /* lwIP includes. */
+    #include "lwip/api.h"
+    #include "lwip/tcpip.h"
+    #include "lwip/memp.h"
+    #include "lwip/stats.h"
+    #include "lwip/sockets.h"
+    #include "lwip/netdb.h"
 
 /* FreeRTOS and LWIP */
 #elif defined(FREERTOS) && defined(WOLFSSL_LWIP)
@@ -416,9 +426,8 @@ static int NetConnect(void *context, const char* host, word16 port,
                 goto exit;
 
             sock->stat = SOCK_CONN;
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case SOCK_CONN:
         {
@@ -631,9 +640,8 @@ static int NetConnect(void *context, const char* host, word16 port,
                 goto exit;
 
             sock->stat = SOCK_CONN;
-
-            FALL_THROUGH;
         }
+        FALL_THROUGH;
 
         case SOCK_CONN:
         {
@@ -711,7 +719,7 @@ static int SN_NetConnect(void *context, const char* host, word16 port,
     struct addrinfo hints;
     MQTTCtx* mqttCtx = sock->mqttCtx;
 
-    PRINTF("NetConnect: Host %s, Port %u, Timeout %d ms, Use TLS %d\n",
+    PRINTF("NetConnect: Host %s, Port %u, Timeout %d ms, Use TLS %d",
         host, port, timeout_ms, mqttCtx->use_tls);
 
     /* Get address information for host and locate IPv4 */
@@ -898,21 +906,34 @@ static int NetRead_ex(void *context, byte* buf, int buf_len,
     #ifndef WOLFMQTT_NO_TIMEOUT
         #ifdef WOLFMQTT_NONBLOCK
         if (mqttCtx->useNonBlockMode) {
+        #ifdef WOLFMQTT_ENABLE_STDIN_CAP
+            /* quick no timeout check if data is available on stdin */
+            setup_timeout(&tv, 0);
+            rc = select((int)SELECT_FD(sock->fd), &recvfds, NULL, &errfds, &tv);
+            if (rc > 0) {
+                if (FD_ISSET(sock->fd, &recvfds)) {
+                    do_read = 1;
+                }
+                else if ((!mqttCtx->test_mode && FD_ISSET(STDIN, &recvfds))) {
+                    return MQTT_CODE_STDIN_WAKE;
+                }
+            }
+        #else
             do_read = 1;
+        #endif
         }
         else
         #endif
         {
             /* Wait for rx data to be available */
             rc = select((int)SELECT_FD(sock->fd), &recvfds, NULL, &errfds, &tv);
-            if (rc > 0)
-            {
+            if (rc > 0) {
                 if (FD_ISSET(sock->fd, &recvfds)) {
                     do_read = 1;
                 }
                 /* Check if rx or error */
             #ifdef WOLFMQTT_ENABLE_STDIN_CAP
-                else if ((!mqttCtx->test_mode && FD_ISSET(STDIN, &recvfds)) 
+                else if ((!mqttCtx->test_mode && FD_ISSET(STDIN, &recvfds))
                 #ifdef WOLFMQTT_MULTITHREAD
                     || FD_ISSET(sock->pfd[0], &recvfds)
                 #endif
@@ -1050,9 +1071,8 @@ int MqttClientNet_Init(MqttNet* net, MQTTCtx* mqttCtx)
         if (dwLastIP[i].Val != ipAddr.Val) {
             dwLastIP[i].Val = ipAddr.Val;
             PRINTF("%s", TCPIP_STACK_NetNameGet(netH));
-            PRINTF(" IP Address: ");
-            PRINTF("%d.%d.%d.%d\n", ipAddr.v[0], ipAddr.v[1], ipAddr.v[2],
-                    ipAddr.v[3]);
+            PRINTF(" IP Address: %d.%d.%d.%d",
+                ipAddr.v[0], ipAddr.v[1], ipAddr.v[2], ipAddr.v[3]);
         }
     }
 #endif /* MICROCHIP_MPLAB_HARMONY */
@@ -1075,7 +1095,7 @@ int MqttClientNet_Init(MqttNet* net, MQTTCtx* mqttCtx)
         sockCtx->fd = SOCKET_INVALID;
         sockCtx->stat = SOCK_BEGIN;
         sockCtx->mqttCtx = mqttCtx;
-    
+
     #if defined(WOLFMQTT_MULTITHREAD) && defined(WOLFMQTT_ENABLE_STDIN_CAP)
         /* setup the pipe for waking select() */
         if (pipe(sockCtx->pfd) != 0) {

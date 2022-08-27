@@ -1,9 +1,9 @@
 # wolfmqtt
-# Copyright (C) 2020 wolfSSL Inc.
+# Copyright (C) 2022 wolfSSL Inc.
 # All right reserved.
 
-AC_COPYRIGHT([Copyright (C) 2014-2020 wolfSSL Inc.])
-AC_INIT([wolfmqtt],[1.7.0],[https://github.com/wolfssl/wolfMQTT/issues],[wolfmqtt],[http://www.wolfssl.com])
+AC_COPYRIGHT([Copyright (C) 2014-2022 wolfSSL Inc.])
+AC_INIT([wolfmqtt],[1.14.0],[https://github.com/wolfssl/wolfMQTT/issues],[wolfmqtt],[http://www.wolfssl.com])
 
 AC_PREREQ([2.63])
 AC_CONFIG_AUX_DIR([build-aux])
@@ -23,7 +23,7 @@ AC_ARG_PROGRAM
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_HEADERS([src/config.h])
 
-WOLFMQTT_LIBRARY_VERSION=7:0:0
+WOLFMQTT_LIBRARY_VERSION=13:0:0
 #                        | | |
 #                 +------+ | +---+
 #                 |        |     |
@@ -71,7 +71,7 @@ DEBUG_CFLAGS="-g -O0 -DDEBUG_WOLFMQTT"
 OPTIMIZE_CFLAGS="-O2"
 
 AX_DEBUG
-AS_IF([test "x$ax_enable_debug" = "xyes" || test "x$ax_enable_debug" = "xverbose"],
+AS_IF([test "x$ax_enable_debug" = "xyes" || test "x$ax_enable_debug" = "xverbose" || test "x$ax_enable_debug" = "xtrace"],
       [AM_CFLAGS="$DEBUG_CFLAGS $AM_CFLAGS -DDEBUG"],
       [AM_CFLAGS="$AM_CFLAGS $OPTIMIZE_CFLAGS -DNDEBUG"])
 
@@ -94,15 +94,39 @@ else
 fi
 
 
-# Verbose Logging
-if test "x$ax_enable_debug" = "xverbose"
+# Logging / Tracing
+if test "x$ax_enable_debug" = "xverbose" || test "x$ax_enable_debug" = "xtrace"
 then
     AM_CFLAGS="$AM_CFLAGS -DWOLFMQTT_DEBUG_CLIENT -DWOLFMQTT_DEBUG_SOCKET"
+    if test "x$ax_enable_debug" = "xtrace"
+    then
+        AM_CFLAGS="$AM_CFLAGS -DWOLFMQTT_DEBUG_TRACE"
+    fi
 fi
 
 
+# ALL FEATURES
+AC_ARG_ENABLE([all],
+    [AS_HELP_STRING([--enable-all],[Enable all wolfMQTT features (default: disabled)])],
+    [ ENABLED_ALL=$enableval ],
+    [ ENABLED_ALL=no ]
+    )
+if test "$ENABLED_ALL" = "yes"
+then
+    test "$enable_tls" = "" && enable_tls=yes
+    test "$enable_nonblock" = "" && enable_nonblock=yes
+    test "$enable_timeout" = "" && enable_timeout=yes
+    test "$enable_examples" = "" && enable_examples=yes
+    test "$enable_errorstrings" = "" && enable_errorstrings=yes
+    test "$enable_stdincap" = "" && enable_stdincap=yes
+    test "$enable_sn" = "" && enable_sn=yes
+    test "$enable_v5" = "" && enable_v5=yes
+    test "$enable_discb" = "" && enable_discb=yes
+    test "$enable_mt" = "" && enable_mt=yes
+    test "$enable_" = "" && enable_=yes
+fi
+
 # TLS Support with wolfSSL
-# Examples, used to disable examples
 AC_ARG_ENABLE([tls],
     [AS_HELP_STRING([--enable-tls],[Enable TLS support with wolfSSL  (default: enabled)])],
     [ ENABLED_TLS=$enableval ],
@@ -115,7 +139,6 @@ then
 
     TAO_REQUIRE_LIBWOLFSSL
 fi
-AM_CONDITIONAL([HAVE_LIBWOLFSSL], [test "x$ENABLED_TLS" = "xyes"])
 
 
 # Non-Blocking support
@@ -143,14 +166,12 @@ then
     AM_CFLAGS="$AM_CFLAGS -DWOLFMQTT_NO_TIMEOUT"
 fi
 
-# Examples
+# Examples, used to disable examples
 AC_ARG_ENABLE([examples],
     [AS_HELP_STRING([--enable-examples],[Enable examples (default: enabled)])],
     [ ENABLED_EXAMPLES=$enableval ],
     [ ENABLED_EXAMPLES=yes ]
     )
-
-AM_CONDITIONAL([BUILD_EXAMPLES], [test "x$ENABLED_EXAMPLES" = "xyes"])
 
 
 # Error strings
@@ -178,8 +199,6 @@ then
     AM_CFLAGS="$AM_CFLAGS -DWOLFMQTT_NO_STDIN_CAP"
 fi
 
-AM_CONDITIONAL([BUILD_STDINCAP], [test "x$ENABLED_STDINCAP" = "xyes"])
-
 
 # MQTT-SN Sensor Network
 AC_ARG_ENABLE([sn],
@@ -193,38 +212,47 @@ then
     AM_CFLAGS="$AM_CFLAGS -DWOLFMQTT_SN"
 fi
 
-AM_CONDITIONAL([BUILD_SN], [test "x$ENABLED_SN" = "xyes"])
 
 # MQTT v5.0
-AC_ARG_ENABLE([mqtt5],
-    [AS_HELP_STRING([--enable-mqtt5],[Enable MQTT v5.0 support (default: disabled)])],
+AC_ARG_ENABLE([v5],
+    [AS_HELP_STRING([--enable-v5],[Enable MQTT v5.0 support (default: disabled)])],
     [ ENABLED_MQTTV50=$enableval ],
     [ ENABLED_MQTTV50=no ]
     )
-
+# Keep old config option for backward compatibility
+AC_ARG_ENABLE([mqtt5],
+    ,
+    [ ENABLED_MQTTV50_old=$enableval ],
+    [ ENABLED_MQTTV50_old=no ]
+    )
+if test "x$ENABLED_MQTTV50_old" = "xyes"
+then
+    ENABLED_MQTTV50=yes
+fi
 if test "x$ENABLED_MQTTV50" = "xyes"
 then
     AM_CFLAGS="$AM_CFLAGS -DWOLFMQTT_V5"
-fi
-
-AM_CONDITIONAL([BUILD_MQTT5], [test "x$ENABLED_MQTTV50" = "xyes"])
-
-# Property callback
-AC_ARG_ENABLE([propcb],
-    [AS_HELP_STRING([--enable-propcb],[Enable property callback (v5 only) (default: disabled)])],
-    [ ENABLED_PROPCB=$enableval ],
-    [ ENABLED_PROPCB=no ]
-    )
-
-if test "x$ENABLED_PROPCB" = "xyes"
-then
-    if test "x$ENABLED_MQTTV50" = "xno"
+    if test "x$ENABLED_PROPCB" = "xyes"
     then
-        AC_MSG_ERROR([cannot enable propcb without enabling mqtt5.])
+        AM_CFLAGS="$AM_CFLAGS -DWOLFMQTT_PROPERTY_CB"
     fi
-    AM_CFLAGS="$AM_CFLAGS -DWOLFMQTT_PROPERTY_CB"
 fi
 
+
+if test "x$ENABLED_MQTTV50" = "xyes"
+then
+    # Property callback, only available when v5 is configured
+    AC_ARG_ENABLE([propcb],
+        [AS_HELP_STRING([--enable-propcb],[Enable property callback (v5 only) (default: enabled)])],
+        [ ENABLED_PROPCB=$enableval ],
+        [ ENABLED_PROPCB=yes ]
+        )
+    
+    if test "x$ENABLED_PROPCB" = "xyes"
+    then
+        AM_CFLAGS="$AM_CFLAGS -DWOLFMQTT_PROPERTY_CB"
+    fi
+fi
 
 # Disconnect callback
 AC_ARG_ENABLE([discb],
@@ -250,7 +278,17 @@ then
     AM_CFLAGS="$AM_CFLAGS -DWOLFMQTT_MULTITHREAD"
 fi
 
+
+
+AM_CONDITIONAL([HAVE_LIBWOLFSSL], [test "x$ENABLED_TLS" = "xyes"])
+AM_CONDITIONAL([BUILD_EXAMPLES], [test "x$ENABLED_EXAMPLES" = "xyes"])
+AM_CONDITIONAL([BUILD_STDINCAP], [test "x$ENABLED_STDINCAP" = "xyes"])
+AM_CONDITIONAL([BUILD_SN], [test "x$ENABLED_SN" = "xyes"])
+AM_CONDITIONAL([BUILD_MQTT5], [test "x$ENABLED_MQTTV50" = "xyes"])
+AM_CONDITIONAL([BUILD_NONBLOCK], [test "x$ENABLED_NONBLOCK" = "xyes"])
 AM_CONDITIONAL([BUILD_MULTITHREAD], [test "x$ENABLED_MULTITHREAD" = "xyes"])
+
+
 
 # HARDEN FLAGS
 AX_HARDEN_CC_COMPILER_FLAGS
@@ -365,7 +403,10 @@ echo "   * Disconnect Callback:       $ENABLED_DISCB"
 echo "   * Error Strings:             $ENABLED_ERROR_STRINGS"
 echo "   * Enable MQTT-SN:            $ENABLED_SN"
 echo "   * Enable MQTT v5.0:          $ENABLED_MQTTV50"
-echo "   * Property Callback:         $ENABLED_PROPCB"
+if test "x$ENABLED_MQTTV50" = "xyes"
+then
+    echo "   * Property Callback:         $ENABLED_PROPCB"
+fi
 echo "   * Examples:                  $ENABLED_EXAMPLES"
 echo "   * Non-Blocking:              $ENABLED_NONBLOCK"
 echo "   * STDIN Capture:             $ENABLED_STDINCAP"

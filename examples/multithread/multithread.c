@@ -1,6 +1,6 @@
 /* multithread.c
  *
- * Copyright (C) 2006-2020 wolfSSL Inc.
+ * Copyright (C) 2006-2022 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -43,15 +43,16 @@
 #define NUM_PUB_TASKS   10
 
 
+#ifdef WOLFMQTT_MULTITHREAD
+
 /* Locals */
 static int mStopRead = 0;
 static int mNumMsgsRecvd;
-
-#ifdef WOLFMQTT_MULTITHREAD
+static int mNumMsgsDone;
 
 #ifdef USE_WINDOWS_API
     /* Windows Threading */
-	#include <windows.h>
+    #include <windows.h>
     #include <process.h>
     typedef HANDLE THREAD_T;
     #define THREAD_CREATE(h, f, c) ((*h = CreateThread(NULL, 0, f, c, 0, NULL)) == NULL)
@@ -59,15 +60,16 @@ static int mNumMsgsRecvd;
     #define THREAD_EXIT(e)         ExitThread(e)
 #else
     /* Posix (Linux/Mac) */
-	#include <pthread.h>
-	#include <sched.h>
+    #include <pthread.h>
+    #include <sched.h>
+    #include <errno.h>
     typedef pthread_t THREAD_T;
     #define THREAD_CREATE(h, f, c) ({ int ret = pthread_create(h, NULL, f, c); if (ret) { errno = ret; } ret; })
     #define THREAD_JOIN(h, c)      ({ int ret, x; for(x=0;x<c;x++) { ret = pthread_join(h[x], NULL); if (ret) { errno = ret; break; }} ret; })
     #define THREAD_EXIT(e)         pthread_exit((void*)e)
 #endif
 
-static wm_Sem packetIdLock; /* Protect access to mqtt_get_packetid() */
+static wm_Sem mtLock; /* Protect "packetId" and "stop" */
 static wm_Sem pingSignal;
 
 static MQTTCtx gMqttCtx;
@@ -75,11 +77,65 @@ static MQTTCtx gMqttCtx;
 static word16 mqtt_get_packetid_threadsafe(void)
 {
     word16 packet_id;
-    wm_SemLock(&packetIdLock);
+    wm_SemLock(&mtLock);
     packet_id = mqtt_get_packetid();
-    wm_SemUnlock(&packetIdLock);
+    wm_SemUnlock(&mtLock);
     return packet_id;
 }
+
+static void mqtt_stop_set(void)
+{
+    wm_SemLock(&mtLock);
+    PRINTF("MQTT Stopping");
+    mStopRead = 1;
+    wm_SemUnlock(&mtLock);
+}
+
+static int mqtt_stop_get(void)
+{
+    int rc;
+    wm_SemLock(&mtLock);
+    rc = mStopRead;
+    wm_SemUnlock(&mtLock);
+    return rc;
+}
+
+static int check_response(MQTTCtx* mqttCtx, int rc, word32* startSec, int packet_type)
+{
+    /* check for test mode */
+    if (mqtt_stop_get()) {
+        PRINTF("MQTT Exiting Thread...");
+        return MQTT_CODE_SUCCESS;
+    }
+
+#ifdef WOLFMQTT_NONBLOCK
+#ifdef WOLFMQTT_TEST_CANCEL
+    if (packet_type == MQTT_PACKET_TYPE_PUBLISH && rc == MQTT_CODE_CONTINUE) {
+        PRINTF("Test cancel by setting early timeout");
+        return MQTT_CODE_ERROR_TIMEOUT;
+    }
+    else
+#else
+        (void)packet_type;
+#endif
+    /* Track elapsed time with no activity and trigger timeout */
+    rc = mqtt_check_timeout(rc, startSec, mqttCtx->cmd_timeout_ms/1000);
+
+    /* check return code */
+    if (rc == MQTT_CODE_CONTINUE) {
+    #if 0
+        /* optionally add delay when debugging */
+        usleep(100*1000);
+    #endif
+    }
+#else
+    (void)packet_type;
+    (void)startSec;
+    (void)mqttCtx;
+#endif
+    return rc;
+}
+
 
 #ifdef WOLFMQTT_DISCONNECT_CB
 /* callback indicates a network error occurred */
@@ -101,6 +157,7 @@ static int mqtt_message_cb(MqttClient *client, MqttMessage *msg,
     MQTTCtx* mqttCtx = (MQTTCtx*)client->ctx;
     (void)mqttCtx;
 
+    wm_SemLock(&mtLock);
     if (msg_new) {
         /* Determine min size to dump */
         len = msg->topic_name_len;
@@ -111,8 +168,8 @@ static int mqtt_message_cb(MqttClient *client, MqttMessage *msg,
         buf[len] = '\0'; /* Make sure its null terminated */
 
         /* Print incoming message */
-        PRINTF("MQTT Message: Topic %s, Qos %d, Id %d, Len %u",
-            buf, msg->qos, msg->packet_id, msg->total_len);
+        PRINTF("MQTT Message: Topic %s, Qos %d, Id %d, Len %u, %u, %u",
+            buf, msg->qos, msg->packet_id, msg->total_len, msg->buffer_len, msg->buffer_pos);
 
         /* for test mode: count the number of TEST_MESSAGE matches received */
         if (mqttCtx->test_mode) {
@@ -122,9 +179,6 @@ static int mqtt_message_cb(MqttClient *client, MqttMessage *msg,
                          msg->buffer_len-2) == 0)
             {
                 mNumMsgsRecvd++;
-                if (mNumMsgsRecvd == NUM_PUB_TASKS) {
-                    mStopRead = 1;
-                }
             }
         }
     }
@@ -136,12 +190,13 @@ static int mqtt_message_cb(MqttClient *client, MqttMessage *msg,
     }
     XMEMCPY(buf, msg->buffer, len);
     buf[len] = '\0'; /* Make sure its null terminated */
-    PRINTF("Payload (%d - %d): %s",
-        msg->buffer_pos, msg->buffer_pos + len, buf);
+    PRINTF("Payload (%d - %d) printing %d bytes:" LINE_END "%s",
+        msg->buffer_pos, msg->buffer_pos + msg->buffer_len, len, buf);
 
     if (msg_done) {
         PRINTF("MQTT Message: Done");
     }
+    wm_SemUnlock(&mtLock);
 
     /* Return negative to terminate publish processing */
     return MQTT_CODE_SUCCESS;
@@ -189,17 +244,19 @@ static void client_disconnect(MQTTCtx *mqttCtx)
 static int multithread_test_init(MQTTCtx *mqttCtx)
 {
     int rc = MQTT_CODE_SUCCESS;
+    word32 startSec;
 
     mNumMsgsRecvd = 0;
+    mNumMsgsDone = 0;
 
     /* Create a demo mutex for making packet id values */
-    rc = wm_SemInit(&packetIdLock);
+    rc = wm_SemInit(&mtLock);
     if (rc != 0) {
         client_exit(mqttCtx);
     }
     rc = wm_SemInit(&pingSignal);
     if (rc != 0) {
-        wm_SemFree(&packetIdLock);
+        wm_SemFree(&mtLock);
         client_exit(mqttCtx);
     }
     wm_SemLock(&pingSignal); /* default to locked */
@@ -236,6 +293,9 @@ static int multithread_test_init(MQTTCtx *mqttCtx)
     /* The client.ctx will be stored in the cert callback ctx during
        MqttSocket_Connect for use by mqtt_tls_verify_cb */
     mqttCtx->client.ctx = mqttCtx;
+#ifdef WOLFMQTT_NONBLOCK
+    mqttCtx->useNonBlockMode = 1;
+#endif
 
 #ifdef WOLFMQTT_DISCONNECT_CB
     /* setup disconnect callback */
@@ -247,9 +307,12 @@ static int multithread_test_init(MQTTCtx *mqttCtx)
 #endif
 
     /* Connect to broker */
-    rc = MqttClient_NetConnect(&mqttCtx->client, mqttCtx->host,
-           mqttCtx->port,
-        DEFAULT_CON_TIMEOUT_MS, mqttCtx->use_tls, mqtt_tls_cb);
+    startSec = 0;
+    do {
+        rc = MqttClient_NetConnect(&mqttCtx->client, mqttCtx->host,
+           mqttCtx->port, DEFAULT_CON_TIMEOUT_MS, mqttCtx->use_tls, mqtt_tls_cb);
+        rc = check_response(mqttCtx, rc, &startSec, MQTT_PACKET_TYPE_CONNECT);
+    } while (rc == MQTT_CODE_CONTINUE);
 
     PRINTF("MQTT Socket Connect: %s (%d)",
         MqttClient_ReturnCodeToString(rc), rc);
@@ -282,9 +345,15 @@ static int multithread_test_init(MQTTCtx *mqttCtx)
     mqttCtx->connect.password = mqttCtx->password;
 
     /* Send Connect and wait for Connect Ack */
+    startSec = 0;
     do {
         rc = MqttClient_Connect(&mqttCtx->client, &mqttCtx->connect);
-    } while (rc == MQTT_CODE_CONTINUE || rc == MQTT_CODE_STDIN_WAKE);
+        rc = check_response(mqttCtx, rc, &startSec, MQTT_PACKET_TYPE_CONNECT);
+    } while (rc == MQTT_CODE_CONTINUE);
+    if (rc != MQTT_CODE_SUCCESS) {
+        MqttClient_CancelMessage(&mqttCtx->client,
+            (MqttObject*)&mqttCtx->connect);
+    }
 
     PRINTF("MQTT Connect: Proto (%s), %s (%d)",
         MqttClient_GetProtocolVersionString(&mqttCtx->client),
@@ -309,14 +378,16 @@ static int multithread_test_finish(MQTTCtx *mqttCtx)
     client_disconnect(mqttCtx);
 
     wm_SemFree(&pingSignal);
-    wm_SemFree(&packetIdLock);
+    wm_SemFree(&mtLock);
+
+    PRINTF("MQTT Client Done: %d", mqttCtx->return_code);
 
     return mqttCtx->return_code;
 }
 
 /* this task subscribes to topic */
 #ifdef USE_WINDOWS_API
-static DWORD WINAPI subscribe_task( LPVOID param ) 
+static DWORD WINAPI subscribe_task( LPVOID param )
 #else
 static void *subscribe_task(void *param)
 #endif
@@ -324,6 +395,7 @@ static void *subscribe_task(void *param)
     int rc = MQTT_CODE_SUCCESS;
     uint16_t i;
     MQTTCtx *mqttCtx = (MQTTCtx*)param;
+    word32 startSec = 0;
 
     /* Build list of topics */
     XMEMSET(&mqttCtx->subscribe, 0, sizeof(MqttSubscribe));
@@ -335,10 +407,9 @@ static void *subscribe_task(void *param)
     if (mqttCtx->subId_not_avail != 1) {
         /* Subscription Identifier */
         MqttProp* prop;
-        mqttCtx->topics[i].sub_id = i + 1; /* Sub ID starts at 1 */
         prop = MqttClient_PropsAdd(&mqttCtx->subscribe.props);
         prop->type = MQTT_PROP_SUBSCRIPTION_ID;
-        prop->data_int = mqttCtx->topics[i].sub_id;
+        prop->data_int = DEFAULT_SUB_ID;
     }
 #endif
 
@@ -348,8 +419,15 @@ static void *subscribe_task(void *param)
             sizeof(mqttCtx->topics) / sizeof(MqttTopic);
     mqttCtx->subscribe.topics = mqttCtx->topics;
 
-    rc = MqttClient_Subscribe(&mqttCtx->client, &mqttCtx->subscribe);
-
+    do {
+        rc = MqttClient_Subscribe(&mqttCtx->client, &mqttCtx->subscribe);
+        rc = check_response(mqttCtx, rc, &startSec, MQTT_PACKET_TYPE_SUBSCRIBE);
+    } while (rc == MQTT_CODE_CONTINUE);
+    if (rc != MQTT_CODE_SUCCESS) {
+        MqttClient_CancelMessage(&mqttCtx->client,
+            (MqttObject*)&mqttCtx->subscribe);
+    }
+    
     PRINTF("MQTT Subscribe: %s (%d)",
         MqttClient_ReturnCodeToString(rc), rc);
 
@@ -372,31 +450,62 @@ static void *subscribe_task(void *param)
     THREAD_EXIT(0);
 }
 
+static int TestIsDone(int rc, MQTTCtx* mqttCtx)
+{
+    int isDone = 0;
+    /* check if we are in test mode and done */
+    wm_SemLock(&mtLock);
+    if ((rc == 0 || rc == MQTT_CODE_CONTINUE) && mqttCtx->test_mode &&
+            mNumMsgsDone == NUM_PUB_TASKS && mNumMsgsRecvd == NUM_PUB_TASKS) {
+        wm_SemUnlock(&mtLock);
+        mqtt_stop_set();
+        isDone = 1; /* done */
+    }
+    wm_SemUnlock(&mtLock);
+    return isDone;
+}
+
 /* This task waits for messages */
 #ifdef USE_WINDOWS_API
-static DWORD WINAPI waitMessage_task( LPVOID param ) 
+static DWORD WINAPI waitMessage_task( LPVOID param )
 #else
 static void *waitMessage_task(void *param)
 #endif
 {
-    int rc;
+    int rc = 0;
     MQTTCtx *mqttCtx = (MQTTCtx*)param;
+    word32 startSec;
+    word32 cmd_timeout_ms = mqttCtx->cmd_timeout_ms;
 
     /* Read Loop */
     PRINTF("MQTT Waiting for message...");
 
+    startSec = 0;
     do {
-        /* Try and read packet */
-        rc = MqttClient_WaitMessage(&mqttCtx->client, mqttCtx->cmd_timeout_ms);
-
-        /* check for test mode */
-        if (mStopRead) {
-            rc = MQTT_CODE_SUCCESS;
-            PRINTF("MQTT Exiting...");
+        if (TestIsDone(rc, mqttCtx)) {
+            rc = 0; /* success */
             break;
         }
 
+        /* if blocking, use short timeout in test mode */
+        if (mqttCtx->test_mode
+        #ifdef WOLFMQTT_NONBLOCK
+            && !mqttCtx->useNonBlockMode
+        #endif
+        ){
+            cmd_timeout_ms = 1000; /* short timeout */
+        }
+        /* Try and read packet */
+        rc = MqttClient_WaitMessage(&mqttCtx->client, cmd_timeout_ms);
+        if (mqttCtx->test_mode && rc == MQTT_CODE_ERROR_TIMEOUT) {
+            rc = 0;
+        }
+        rc = check_response(mqttCtx, rc, &startSec, MQTT_PACKET_TYPE_ANY);
+
         /* check return code */
+        if (rc == MQTT_CODE_CONTINUE) {
+            continue;
+        }
     #ifdef WOLFMQTT_ENABLE_STDIN_CAP
         else if (rc == MQTT_CODE_STDIN_WAKE) {
             XMEMSET(mqttCtx->rx_buf, 0, MAX_BUFFER_SIZE);
@@ -440,7 +549,8 @@ static void *waitMessage_task(void *param)
                 MqttClient_ReturnCodeToString(rc), rc);
             break;
         }
-    } while (!mStopRead);
+        startSec = 0;
+    } while (!mqtt_stop_get());
 
     mqttCtx->return_code = rc;
     wm_SemUnlock(&pingSignal); /* wake ping thread */
@@ -451,7 +561,7 @@ static void *waitMessage_task(void *param)
 /* This task publishes a message to the broker. The task will be created
    NUM_PUB_TASKS times, sending a unique message each time. */
 #ifdef USE_WINDOWS_API
-static DWORD WINAPI publish_task( LPVOID param ) 
+static DWORD WINAPI publish_task( LPVOID param )
 #else
 static void *publish_task(void *param)
 #endif
@@ -460,6 +570,7 @@ static void *publish_task(void *param)
     char buf[7];
     MQTTCtx *mqttCtx = (MQTTCtx*)param;
     MqttPublish publish;
+    word32 startSec = 0;
 
     /* Publish Topic */
     XMEMSET(&publish, 0, sizeof(MqttPublish));
@@ -474,17 +585,27 @@ static void *publish_task(void *param)
     publish.buffer = (byte*)buf;
     publish.total_len = (word16)XSTRLEN(buf);
 
-    rc = MqttClient_Publish(&mqttCtx->client, &publish);
+    do {
+        rc = MqttClient_Publish_WriteOnly(&mqttCtx->client, &publish, NULL);
+        rc = check_response(mqttCtx, rc, &startSec, MQTT_PACKET_TYPE_PUBLISH);
+    } while (rc == MQTT_CODE_CONTINUE);
+    if (rc != MQTT_CODE_SUCCESS) {
+        MqttClient_CancelMessage(&mqttCtx->client, (MqttObject*)&publish);
+    }
 
+    wm_SemLock(&mtLock);
     PRINTF("MQTT Publish: Topic %s, %s (%d)",
         publish.topic_name,
         MqttClient_ReturnCodeToString(rc), rc);
+
+    mNumMsgsDone++;
+    wm_SemUnlock(&mtLock);
 
     THREAD_EXIT(0);
 }
 
 #ifdef USE_WINDOWS_API
-static DWORD WINAPI ping_task( LPVOID param ) 
+static DWORD WINAPI ping_task( LPVOID param )
 #else
 static void *ping_task(void *param)
 #endif
@@ -492,24 +613,33 @@ static void *ping_task(void *param)
     int rc;
     MQTTCtx *mqttCtx = (MQTTCtx*)param;
     MqttPing ping;
-
-    XMEMSET(&ping, 0, sizeof(ping));
+    word32 startSec;
 
     do {
         wm_SemLock(&pingSignal);
-        if (mStopRead)
+        if (mqtt_stop_get()) {
             break;
+        }
 
         /* Keep Alive Ping */
         PRINTF("Sending ping keep-alive");
 
-        rc = MqttClient_Ping_ex(&mqttCtx->client, &ping);
+        startSec = 0;
+        XMEMSET(&ping, 0, sizeof(ping));
+        do {
+            rc = MqttClient_Ping_ex(&mqttCtx->client, &ping);
+            rc = check_response(mqttCtx, rc, &startSec, MQTT_PACKET_TYPE_PING_REQ);
+        } while (rc == MQTT_CODE_CONTINUE);
+        if (rc != MQTT_CODE_SUCCESS) {
+            MqttClient_CancelMessage(&mqttCtx->client, (MqttObject*)&ping);
+        }
+
         if (rc != MQTT_CODE_SUCCESS) {
             PRINTF("MQTT Ping Keep Alive Error: %s (%d)",
                 MqttClient_ReturnCodeToString(rc), rc);
             break;
         }
-    } while (!mStopRead);
+    } while (!mqtt_stop_get());
 
     THREAD_EXIT(0);
 }
@@ -517,6 +647,7 @@ static void *ping_task(void *param)
 static int unsubscribe_do(MQTTCtx *mqttCtx)
 {
     int rc;
+    word32 startSec = 0;
 
     /* Unsubscribe Topics */
     XMEMSET(&mqttCtx->unsubscribe, 0, sizeof(MqttUnsubscribe));
@@ -526,8 +657,14 @@ static int unsubscribe_do(MQTTCtx *mqttCtx)
     mqttCtx->unsubscribe.topics = mqttCtx->topics;
 
     /* Unsubscribe Topics */
-    rc = MqttClient_Unsubscribe(&mqttCtx->client,
-           &mqttCtx->unsubscribe);
+    do {
+        rc = MqttClient_Unsubscribe(&mqttCtx->client, &mqttCtx->unsubscribe);
+        rc = check_response(mqttCtx, rc, &startSec, MQTT_PACKET_TYPE_UNSUBSCRIBE);
+    } while (rc == MQTT_CODE_CONTINUE);
+    if (rc != MQTT_CODE_SUCCESS) {
+        MqttClient_CancelMessage(&mqttCtx->client,
+            (MqttObject*)&mqttCtx->unsubscribe);
+    }
 
     PRINTF("MQTT Unsubscribe: %s (%d)",
         MqttClient_ReturnCodeToString(rc), rc);
@@ -537,49 +674,49 @@ static int unsubscribe_do(MQTTCtx *mqttCtx)
 
 int multithread_test(MQTTCtx *mqttCtx)
 {
-    int rc = 0;
-    int i;
+    int rc = 0, i, threadCount = 0;
     THREAD_T threadList[NUM_PUB_TASKS+3];
-    int threadCount = 0;
 
     rc = multithread_test_init(mqttCtx);
     if (rc == 0) {
         if (THREAD_CREATE(&threadList[threadCount++], subscribe_task, mqttCtx)) {
-            PRINTF("THREAD_CREATE failed: %d\n", errno);
+            PRINTF("THREAD_CREATE failed: %d", errno);
             return -1;
         }
         /* for test mode, we must complete subscribe to track number of pubs received */
         if (mqttCtx->test_mode) {
             if (THREAD_JOIN(threadList, threadCount)) {
-                PRINTF("THREAD_JOIN failed: %d\n", errno);
+                PRINTF("THREAD_JOIN failed: %d", errno);
                 return -1;
             }
             threadCount = 0;
         }
         /* Create the thread that waits for messages */
         if (THREAD_CREATE(&threadList[threadCount++], waitMessage_task, mqttCtx)) {
-            PRINTF("THREAD_CREATE failed: %d\n", errno);
+            PRINTF("THREAD_CREATE failed: %d", errno);
             return -1;
         }
         /* Ping */
         if (THREAD_CREATE(&threadList[threadCount++], ping_task, mqttCtx)) {
-            PRINTF("THREAD_CREATE failed: %d\n", errno);
+            PRINTF("THREAD_CREATE failed: %d", errno);
             return -1;
         }
         /* Create threads that publish unique messages */
         for (i = 0; i < NUM_PUB_TASKS; i++) {
             if (THREAD_CREATE(&threadList[threadCount++], publish_task, mqttCtx)) {
-                PRINTF("THREAD_CREATE failed: %d\n", errno);
+                PRINTF("THREAD_CREATE failed: %d", errno);
                 return -1;
             }
         }
-        
+
         /* Join threads - wait for completion */
         if (THREAD_JOIN(threadList, threadCount)) {
 #ifdef __GLIBC__
-            PRINTF("THREAD_JOIN failed: %m\n"); /* %m is specific to glibc/uclibc/musl, and recently (2018) added to FreeBSD */
+            /* %m is specific to glibc/uclibc/musl, and recently (2018) 
+             * added to FreeBSD */
+            PRINTF("THREAD_JOIN failed: %m");
 #else
-            PRINTF("THREAD_JOIN failed: %d\n",errno);
+            PRINTF("THREAD_JOIN failed: %d",errno);
 #endif
         }
 
@@ -599,7 +736,7 @@ int multithread_test(MQTTCtx *mqttCtx)
         static BOOL CtrlHandler(DWORD fdwCtrlType)
         {
             if (fdwCtrlType == CTRL_C_EVENT) {
-                mStopRead = 1;
+                mqtt_stop_set();
                 PRINTF("Received Ctrl+c");
             #ifdef WOLFMQTT_ENABLE_STDIN_CAP
                 MqttClientNet_Wake(&gMqttCtx.net);
@@ -613,9 +750,11 @@ int multithread_test(MQTTCtx *mqttCtx)
         static void sig_handler(int signo)
         {
             if (signo == SIGINT) {
-                mStopRead = 1;
+            #ifdef WOLFMQTT_MULTITHREAD
+                mqtt_stop_set();
+            #endif
                 PRINTF("Received SIGINT");
-            #ifdef WOLFMQTT_ENABLE_STDIN_CAP
+            #if defined(WOLFMQTT_MULTITHREAD) && defined(WOLFMQTT_ENABLE_STDIN_CAP)
                 MqttClientNet_Wake(&gMqttCtx.net);
             #endif
             }

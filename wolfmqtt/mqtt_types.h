@@ -1,6 +1,6 @@
 /* mqtt_types.h
  *
- * Copyright (C) 2006-2020 wolfSSL Inc.
+ * Copyright (C) 2006-2022 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -65,7 +65,8 @@
 #endif
 
 #ifdef ENABLE_MQTT_TLS
-    #if !defined(WOLFSSL_USER_SETTINGS) && !defined(USE_WINDOWS_API)
+    #if !defined(WOLFSSL_USER_SETTINGS) && \
+        (!defined(USE_WINDOWS_API) || defined(BUILDING_CMAKE))
         #include <wolfssl/options.h>
     #endif
     #include <wolfssl/wolfcrypt/settings.h>
@@ -84,17 +85,23 @@
 
 #ifdef WOLFMQTT_MULTITHREAD
     /* Multi-threading uses binary semaphores */
-    #if defined(__MACH__)
+    #if defined(WOLFMQTT_USER_THREADING)
+        /* User provides API's and wm_Sem type.
+         * Add your wc_Sem into user_settings.h */
+
+    #elif defined(__MACH__)
         /* Apple Style Dispatch Semaphore */
         #include <dispatch/dispatch.h>
-        typedef dispatch_semaphore_t wm_Sem;
+        typedef struct {
+            dispatch_semaphore_t sem;
+        } wm_Sem;
 
-    #elif defined(__FreeBSD__) || defined(__linux__)
+    #elif defined(__FreeBSD__) || defined(__linux__) || defined(__QNX__)
         /* Posix Style Pthread Mutex and Conditional */
         #define WOLFMQTT_POSIX_SEMAPHORES
         #include <pthread.h>
         typedef struct {
-            int lockCount;
+            volatile int lockCount;
             pthread_mutex_t mutex;
             pthread_cond_t cond;
         } wm_Sem;
@@ -111,9 +118,6 @@
         #include <ws2tcpip.h>
         #include <windows.h>
         typedef HANDLE wm_Sem;
-    
-    #elif defined(WOLFMQTT_USER_THREADING)
-        /* User provides API's and wm_Sem type */
 
     #else
         #error "Multithreading requires binary semaphore implementation!"
@@ -180,9 +184,12 @@ enum MqttPacketResponseCodes {
     MQTT_CODE_ERROR_PROPERTY = -11,
     MQTT_CODE_ERROR_SERVER_PROP = -12,
     MQTT_CODE_ERROR_CALLBACK = -13,
+    MQTT_CODE_ERROR_SYSTEM = -14,
+    MQTT_CODE_ERROR_NOT_FOUND = -15,
 
     MQTT_CODE_CONTINUE = -101,
     MQTT_CODE_STDIN_WAKE = -102,
+    MQTT_CODE_PUB_CONTINUE = -103,
 };
 
 
@@ -260,6 +267,13 @@ enum MqttPacketResponseCodes {
 #endif /* !NO_INLINE */
 #endif /* !INLINE */
 
+#ifndef OFFSETOF
+    #if defined(__clang__) || defined(__GNUC__)
+        #define OFFSETOF(type, field) __builtin_offsetof(type, field)
+    #else
+        #define OFFSETOF(type, field) ((size_t)&(((type *)0)->field))
+    #endif
+#endif
 
 /* printf */
 #ifndef WOLFMQTT_CUSTOM_PRINTF
@@ -292,17 +306,23 @@ enum MqttPacketResponseCodes {
     #endif
 #endif
 
-/* GCC 7 has new switch() fall-through detection */
-/* default to FALL_THROUGH stub */
 #ifndef FALL_THROUGH
-#define FALL_THROUGH
-
-#if defined(__GNUC__)
-    #if ((__GNUC__ > 7) || ((__GNUC__ == 7) && (__GNUC_MINOR__ >= 1)))
-        #undef  FALL_THROUGH
-        #define FALL_THROUGH __attribute__ ((fallthrough));
+    /* GCC 7 has new switch() fall-through detection */
+    #if defined(__GNUC__)
+        #if ((__GNUC__ > 7) || ((__GNUC__ == 7) && (__GNUC_MINOR__ >= 1)))
+            #undef  FALL_THROUGH
+            #if defined(WOLFSSL_LINUXKM) && defined(fallthrough)
+                #define FALL_THROUGH fallthrough
+            #else
+                #define FALL_THROUGH __attribute__ ((fallthrough));
+            #endif
+        #endif
     #endif
-#endif
+#endif /* FALL_THROUGH */
+#if !defined(FALL_THROUGH) || defined(__XC32)
+    /* use stub for fall through by default or for Microchip compiler */
+    #undef  FALL_THROUGH
+    #define FALL_THROUGH
 #endif
 
 /* No return macro */
@@ -311,6 +331,20 @@ enum MqttPacketResponseCodes {
 #else
     #define WOLFMQTT_NORETURN
 #endif
+
+/* Logging / Tracing */
+#ifdef WOLFMQTT_NO_STDIO
+    #undef WOLFMQTT_DEBUG_CLIENT
+    #undef WOLFMQTT_DEBUG_SOCKET
+#endif
+
+#ifdef WOLFMQTT_DEBUG_TRACE
+#define MQTT_TRACE_ERROR(err) ({ PRINTF("ERROR: %d (%s:%d)", err, __FUNCTION__, __LINE__); err; })
+#define MQTT_TRACE_MSG(msg)      PRINTF("%s: (%s:%d)", msg, __FUNCTION__, __LINE__);
+#else
+#define MQTT_TRACE_ERROR(err) err
+#define MQTT_TRACE_MSG(msg)
+#endif /* WOLFMQTT_DEBUG_TRACE */
 
 #ifdef __cplusplus
     } /* extern "C" */

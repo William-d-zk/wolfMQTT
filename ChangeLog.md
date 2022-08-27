@@ -1,10 +1,92 @@
-
 ## Release Notes
+
+### v1.14.0 (7/25/2022)
+* Support post-quantum KYBER_LEVEL1 and P256_KYBER_LEVEL1 with FALCON_LEVEL1 
+  in wolfMQTT. by @anhu #300
+* Add WOLFMQTT_USE_CB_ON_DISCONNECT for CB on client disconnect by @embhorn 
+  in #302
+* Fix to release connect ack props by @embhorn in #301
+
+### v1.13.0 (5/4/2022)
+* Fix windows build test by @lealem47 in #286
+* Add async support for wolfMQTT by @dgarske in #285
+* Allow message callback to set reason code for response by @embhorn in #287
+* Porting WolfMQTT to NUCLEO F767ZI  with TOPPERS OS by @nekoman2187 in #254
+* Fixes for non-blocking state and large payload by @dgarske in #288
+* Add CMake support build by @elms in #292
+* Fix for improper reset of shared object by @dgarske in #291
+* cmake: add example option and fixes for vcpkg by @elms in #293
+* cmake: shared/static lib build and cleanup by @elms in #295
+* Fix example msg cb print error @embhorn in #298
+
+### v1.12 (2/23/2022)
+* Allow MqttClient_WaitType to return MQTT_CODE_CONTINUE with MT (PR #283)
+* Fix decoding user property and add example (PR #282)
+* Fix issue with MqttClient_Publish_WriteOnly not waiting properly for ACK
+  (PR #281)
+* Fix MQTTv5 disconnect with props (PR #279)
+* Add new publish write only API for multi-threading (PR #277)
+* Fix for multithreaded cancel (PR #276)
+* MQTT-SN Add disconnect_cb when disconnect recv from broker; Fix PUB ACK
+  return status handling (PR #274)
+* Enable TLS1.3 in examples (PR #273)
+* Adding windows github actions build test (PR #272)
+
+### v1.11 (1/7/2022)
+* Return correct error code in SN_Client_Connect (PR #268)
+* Removing unsupported TLS and SNI options in sn-client (PR #266)
+* Fixes for multithreading with non-blocking (PR #252)
+* Doxygen work removing depreciated command and fixing other warnings (PR #264)
+* Fix overwriting TLS error in connect (PR #259)
+* Add GitHub Actions (PR #256 #260 #263)
+* Fix wm_Sem on Windows (PR #255 #261)
+* Fix scripts for host without mosquitto (PR #257 #265)
+* Trim whitespace and convert tab to spaces (PR #251)
+* Refactor of write length (PR #250)
+* Fixes for publish edge cases (PR #248)
+* Remove unused sub_id element, add support for local test broker (PR #249)
+* Fix to make sure MqttClient_DecodePacket called in all cases (PR #246)
+
+* Known bug with multithread and without nonblocking enabled in this release.
+
+### v1.10 (11/2/2021)
+* Improve FALL_THROUGH macro logic for XC32. (PR #227)
+* Fix potential NULL printf in MqttSocket_Connect with verbose debug enabled. (PR #229)
+* Fix non-block chunked transfer. (PR #230)
+* Fix QoS responses (PR #231, 240)
+* Fix MQTTv5 property handling (PR #232, 233, 234, 236, 238, 241)
+* Fix fuzzing test issues (PR #242)
+
+### v1.9 (07/16/2021)
+* Fixes for Sensor Network client (PR #204, 214, 219)
+* Fixes for non-blocking (PR #205)
+* Fixes for multithread (PR #207, 209, 211, 218)
+* Fix for MQTTv5 publish response handling (PR #224, 220)
+* Fix subscribe return code list (PR #210)
+* Fix switch statement fallthrough on other toolchains (PR #225)
+* Add HiveMQ Cloud capability with SNI feature (PR #222)
+* Add ability to publish files from example client, fix chunked publish (PR# 223)
+
+### v1.8 (02/19/2021)
+* Fixes for non-blocking in WIN32 and large payload (PR #202)
+* Make TLS IO callback functions public (PR #201)
+* Bug fixes (PR #186, 188, 189, 193, 196, 199, 200)
+* Update default test broker (PR #194)
+* MQTT-SN fixes for multithread and register topic name (PR #185, 190)
+* Fix multi-thread to use pthread mutex with condition (PR #183)
+* Fix for WIN thread create macro (PR #182)
+* Use options.h with Arduino build (PR #181)
+* Use MqttClient_Ping_ex instead of MqttClient_Ping in examples (PR #179)
+* Fixes for building with MinGW (PR #178)
+* MQTT-SN support for multithread (PR #176)
+* TLS mutual auth in client examples (PR #175)
+* MQTT-SN feature enhancements (PR #173)
+* Add runtime message option to client (PR #171)
 
 ### v1.7 (08/21/2020)
 
 * Fix for publish with short topic name and example. (PR #169)
-Add MqttProps_ShutDown(). Fix MqttProp leaks(PR #167)
+* Add MqttProps_ShutDown(). Fix MqttProp leaks(PR #167)
 * Multithread fixes. (PR #166)
 * Fix buffer overrun in strcpy(). Fix logic around getaddrinfo(). (PR #165)
 * Fix MqttClient_WaitType for nonblock mode. (PR #164)
