@@ -1,5 +1,123 @@
 ## Release Notes
 
+### v1.20.0 (05/02/2025)
+Release 1.20.0 has been developed according to wolfSSL's development and QA
+process (see link below) and successfully passed the quality criteria.
+https://www.wolfssl.com/about/wolfssl-software-development-process-quality-assurance
+
+* OQS's Mosquitto is out of date. by @anhu in #417
+* Add support for websocket by @embhorn in #418
+* Add support for secure websockets by @embhorn in #419
+* Add secure ws CI test by @embhorn in #421
+* Update examples for latest Managed Components by @gojimmypi in #420
+* Improve cmake duplicate component check by @gojimmypi in #422
+
+### v1.19.2 (01/31/2025)
+Release 1.19.2 has been developed according to wolfSSL's development and QA
+process (see link below) and successfully passed the quality criteria.
+https://www.wolfssl.com/about/wolfssl-software-development-process-quality-assurance
+
+* Handle connection error in mqttsimple client by @embhorn in #407
+* Fix stat reset for ping response by @embhorn in #414
+
+### v1.19.1 (11/06/2024)
+Release 1.19.1 has been developed according to wolfSSL's development and QA process (see link below) and successfully passed the quality criteria.
+https://www.wolfssl.com/about/wolfssl-software-development-process-quality-assurance
+
+* wolfssl 5.7.2 time_helper type adjustments for Espressif example by @gojimmypi in #404
+* Fix Doxygen issues by @embhorn in #403
+
+### v1.19.0 (3/22/2024)
+Release 1.19.0 has been developed according to wolfSSL's development and QA process (see link below) and successfully passed the quality criteria.
+https://www.wolfssl.com/about/wolfssl-software-development-process-quality-assurance
+
+* Add stress test. by @philljj in #387
+* Add cmake CI test and fix pthread detection by @embhorn in #389
+* Initial wolfMQTT Espressif ESP32 template and AWS IoT examples by @gojimmypi in #388
+* Add curl test dependencies by @lealem47 in #392
+* Improving and fixing typos for STM32CUBE build by @lealem47 in #391
+* Fix string prop OOB read by @embhorn in #394
+* Fix some Helgrind thread errors with enable-tls, and enable-curl. by @philljj in #396
+* Initial Espressif CI; limit Zepher CI by @gojimmypi in #390
+* Fix double unlock and double lock in multithread example. by @philljj in #397
+* Fix double lock of lockRecv. by @philljj in #398
+
+### v1.18.0 (12/22/2023)
+Release 1.18.0 has been developed according to wolfSSL's development and QA process (see link below) and successfully passed the quality criteria.
+https://www.wolfssl.com/about/wolfssl-software-development-process-quality-assurance
+
+* Add curl easy socket backend. by @philljj in #380
+* WOLFMQTT_EXAMPLE_CERT allowing static or extern cert assignment by @gojimmypi in #354
+* Tiny readme cleanup. by @philljj in #381
+* Fix high coverity issues by @embhorn in #379
+* Add broker check to scripts by @embhorn in #385
+* Cmake build fixes by @embhorn in #384
+
+### v1.17.1 (11/29/2023)
+Release 1.17.1 has been developed according to wolfSSL's development and QA process (see link below) and successfully passed the quality criteria.
+https://www.wolfssl.com/about/wolfssl-software-development-process-quality-assurance
+
+* Include stdint.h in userio_template.h by @lealem47 in #371
+* Improvements to multithread locking and tests. by @dgarske in #369
+* Cleanup executable status on src files. by @philljj in #372
+* Close socket on error in NetConnect by @embhorn in #375
+* Fixes for non-blocking with larger payload and improvements to the test and examples by @dgarske in #373
+* Add MQTT-SN CI tests by @embhorn in #376
+* Fix Wild read in MqttProps_Free by @embhorn in #377
+* Fix fuzzer issues in MqttDecode_Props by @embhorn in #378
+
+### v1.17.0 (11/2/2023)
+Release 1.17.0 has been developed according to wolfSSL's development and QA process (see link below) and successfully passed the quality criteria.
+https://www.wolfssl.com/about/wolfssl-software-development-process-quality-assurance
+
+* Fix for declaration after executable block by @lealem47 in #341
+* Add QNX IDE, Makefile, and remove source code exec bit by @JacobBarthelmeh 
+  in #317
+* update for cmake after wolfssl added NAMESPACE by @JacobBarthelmeh in #343
+* Add mutex protection to MqttClient_NetDisconnect by @embhorn in #342
+* Add DTLS support to MQTT-SN client by @embhorn in #348
+* Tie zephyr tests to a release by @julek-wolfssl in #350
+* add documentation link to README by @gojimmypi in #355
+* Possible patch for POSIX conditional wait issue by @dgarske in #356
+* Fix publish with topic ID >=127 by @embhorn in #351
+* Adding publish and subscribe atomic client examples by @embhorn in #347
+* Allow disabling the posix conditional signal by @dgarske in #360
+* Exclude CI tests with external brokers by @embhorn in #362
+* Improvements for client property stack by @dgarske in #361
+* Add mosquitto to CI tests by @embhorn in #365
+* Fixes for non-blocking edge cases by @dgarske in #363
+* Refactor MQTT-SN code by @embhorn in #366
+
+### v1.16.0 (6/29/2023)
+* Add testing for TLS mutual auth, and fsanitize gh test by @lealem47 in #321
+* Add support for pkcs8 keys to mqtt client by @lealem47 in #322
+* Fix null ptr deref in MqttClient_WaitType by @embhorn in #323
+* Cleanup enum last entry to not have comma by @dgarske in #324
+* Cleanup the AWS example by @dgarske in #326
+* Fix for multi-threaded non-blocking use of sockRc, which could collide
+  between read and write by @dgarske in #328
+* Add API to check if message is active (non-blocking only) by @dgarske in #329
+* Fix configure warnings by @embhorn in #330
+* Support MQTTv5 in AWS example by @embhorn in #332
+* Zephyr port by @julek-wolfssl in #333
+* Improve example headers and small sanitizer fixes by @lealem47 in #334
+* Adding in STM32CubeIDE support by @lealem47 in #335
+* Add dynamic property support by @embhorn in #336
+
+### v1.15.1 (3/14/2023)
+* Fix to protect read from client->write.len, which resolve edge case issue
+  when using multi-threading. (PR #318 and PR #319)
+
+### v1.15.0 (12/30/2022)
+* Fix for --with-libwolfssl-prefix config option #312
+* Call disconn CB with MQTTv5 reason code #314
+* Add github CIFuzz action by @DavidKorczynski #315
+* Fix SN disconnect with sleep should not use CB #294
+
+### v1.14.1 (8/31/2022)
+* Fix cmake builds #307
+* Fix for Vcpkg on Windows not getting wolfssl/options.h included #305
+
 ### v1.14.0 (7/25/2022)
 * Support post-quantum KYBER_LEVEL1 and P256_KYBER_LEVEL1 with FALCON_LEVEL1 
   in wolfMQTT. by @anhu #300
@@ -223,7 +341,7 @@
 * Refactor to use new `MQTT_CODE_STDIN_WAKE` return code for examples using STDIN to send publish messages (normal blocking mode only).
 
 ### v0.12 (12/20/16)
-* Fixes issue with read timeout in non-blocking mode with TLS enabled being teated as socket error.
+* Fixes issue with read timeout in non-blocking mode with TLS enabled being treated as socket error.
 * Fixed issue with “msg->stat” not getting reset on failure or timeout.
 * Fix to not link libwolfssl with ./configure --disable-tls.
 * Added AWS IoT Example and test script.

@@ -1,0 +1,26 @@
+name: Espressif tests
+
+on:
+  push:
+    branches: [ 'master', 'main', 'release/**' ]
+  pull_request:
+    branches: [ '*' ]
+
+jobs:
+  espressif_latest:
+    name: latest Docker container
+    runs-on: ubuntu-22.04
+    # This should be a safe limit for the tests to run.
+    timeout-minutes: 12
+
+    container:
+      # The latest stable release is v5.5
+      image: espressif/idf:release-v5.5
+      # image: espressif/idf:latest # The "latest" has breaking changes for ESP-IDF V6
+
+    steps:
+      - uses: actions/checkout@v3
+      - name: Initialize Espressif IDE and build examples
+        # WSL does not properly honor `chmod +x` so we'll do it manually here:
+        run: . /opt/esp/idf/export.sh; chmod +x IDE/Espressif/ESP-IDF/compileAllExamples.sh; IDE/Espressif/ESP-IDF/compileAllExamples.sh
+

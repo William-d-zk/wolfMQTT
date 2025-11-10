@@ -1,6 +1,6 @@
 /* mqttnet.c
  *
- * Copyright (C) 2006-2022 wolfSSL Inc.
+ * Copyright (C) 2006-2025 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -24,159 +24,7 @@
     #include <config.h>
 #endif
 
-#include "wolfmqtt/mqtt_client.h"
 #include "examples/mqttnet.h"
-#include "examples/mqttexample.h"
-
-/* FreeRTOS TCP */
-#ifdef FREERTOS_TCP
-    #include "FreeRTOS.h"
-    #include "task.h"
-    #include "FreeRTOS_IP.h"
-    #include "FreeRTOS_DNS.h"
-    #include "FreeRTOS_Sockets.h"
-
-    #define SOCKET_T                     Socket_t
-    #define SOCK_ADDR_IN                 struct freertos_sockaddr
-
-/* ToppersOS and LWIP */
-#elif defined(TOPPERS) && defined(WOLFSSL_LWIP)
-    /* lwIP includes. */
-    #include "lwip/api.h"
-    #include "lwip/tcpip.h"
-    #include "lwip/memp.h"
-    #include "lwip/stats.h"
-    #include "lwip/sockets.h"
-    #include "lwip/netdb.h"
-
-/* FreeRTOS and LWIP */
-#elif defined(FREERTOS) && defined(WOLFSSL_LWIP)
-    /* Scheduler includes. */
-    #include "FreeRTOS.h"
-    #include "task.h"
-    #include "semphr.h"
-
-    /* lwIP includes. */
-    #include "lwip/api.h"
-    #include "lwip/tcpip.h"
-    #include "lwip/memp.h"
-    #include "lwip/stats.h"
-    #include "lwip/sockets.h"
-    #include "lwip/netdb.h"
-
-/* Windows */
-#elif defined(USE_WINDOWS_API)
-    #include <winsock2.h>
-    #include <ws2tcpip.h>
-    #include <stdio.h>
-    #define SOCKET_T        SOCKET
-    #ifdef _WIN32
-        #define SOERROR_T int
-    #else
-        #define SOERROR_T char
-    #endif
-    #define SELECT_FD(fd)   (fd)
-    #ifndef SOCKET_INVALID /* Do not redefine from wolfssl */
-        #define SOCKET_INVALID  ((SOCKET_T)INVALID_SOCKET)
-    #endif
-    #define SOCK_CLOSE      closesocket
-    #define SOCK_SEND(s,b,l,f) send((s), (const char*)(b), (size_t)(l), (f))
-    #define SOCK_RECV(s,b,l,f) recv((s), (char*)(b), (size_t)(l), (f))
-    #define GET_SOCK_ERROR(f,s,o,e) (e) = WSAGetLastError()
-    #define SOCK_EQ_ERROR(e) (((e) == WSAEWOULDBLOCK) || ((e) == WSAEINPROGRESS))
-
-/* Freescale MQX / RTCS */
-#elif defined(FREESCALE_MQX) || defined(FREESCALE_KSDK_MQX)
-    #if defined(FREESCALE_MQX)
-        #include <posix.h>
-    #endif
-    #include <rtcs.h>
-    /* Note: Use "RTCS_geterror(sock->fd);" to get error number */
-    #define SOCKET_INVALID  RTCS_SOCKET_ERROR
-    #define SOCKET_T        uint32_t
-    #define SOCK_CLOSE      closesocket
-    #define SOCK_OPEN       RTCS_socket
-
-/* Microchip MPLABX Harmony, TCP/IP */
-#elif defined(MICROCHIP_MPLAB_HARMONY)
-    #include "app.h"
-    #include "system_config.h"
-    #include "tcpip/tcpip.h"
-    #include <sys/errno.h>
-    #include <errno.h>
-
-    #define SOCKET_INVALID (-1)
-    #define SOCK_CLOSE      closesocket
-
-    #ifndef WOLFMQTT_NONBLOCK
-        #error wolfMQTT must be built with WOLFMQTT_NONBLOCK defined for Harmony
-    #endif
-
-/* Linux */
-#else
-    #include <sys/types.h>
-    #include <sys/socket.h>
-    #include <sys/param.h>
-    #include <sys/time.h>
-    #include <sys/select.h>
-    #include <netinet/in.h>
-    #include <netinet/tcp.h>
-    #include <arpa/inet.h>
-    #include <netdb.h>
-    #include <unistd.h>
-    #include <errno.h>
-    #include <fcntl.h>
-    #include <signal.h>
-#endif
-
-/* Setup defaults */
-#ifndef SOCK_OPEN
-    #define SOCK_OPEN       socket
-#endif
-#ifndef SOCKET_T
-    #define SOCKET_T        int
-#endif
-#ifndef SOERROR_T
-    #define SOERROR_T       int
-#endif
-#ifndef SELECT_FD
-    #define SELECT_FD(fd)   ((fd) + 1)
-#endif
-#ifndef SOCKET_INVALID
-    #define SOCKET_INVALID  ((SOCKET_T)0)
-#endif
-#ifndef SOCK_CONNECT
-    #define SOCK_CONNECT    connect
-#endif
-#ifndef SOCK_SEND
-    #define SOCK_SEND(s,b,l,f) send((s), (b), (size_t)(l), (f))
-#endif
-#ifndef SOCK_RECV
-    #define SOCK_RECV(s,b,l,f) recv((s), (b), (size_t)(l), (f))
-#endif
-#ifndef SOCK_CLOSE
-    #define SOCK_CLOSE      close
-#endif
-#ifndef SOCK_ADDR_IN
-    #define SOCK_ADDR_IN    struct sockaddr_in
-#endif
-#ifdef SOCK_ADDRINFO
-    #define SOCK_ADDRINFO   struct addrinfo
-#endif
-#ifndef GET_SOCK_ERROR
-    #define GET_SOCK_ERROR(f,s,o,e) \
-        socklen_t len = sizeof(so_error); \
-        getsockopt((f), (s), (o), &(e), &len)
-#endif
-#ifndef SOCK_EQ_ERROR
-    #define SOCK_EQ_ERROR(e) (((e) == EWOULDBLOCK) || ((e) == EAGAIN))
-#endif
-/* Local context for Net callbacks */
-typedef enum {
-    SOCK_BEGIN = 0,
-    SOCK_CONN,
-} NB_Stat;
-
 
 #if 0 /* TODO: add multicast support */
 typedef struct MulticastCtx {
@@ -184,20 +32,9 @@ typedef struct MulticastCtx {
 } MulticastCtx;
 #endif
 
-
-typedef struct _SocketContext {
-    SOCKET_T fd;
-    NB_Stat stat;
-    SOCK_ADDR_IN addr;
-#ifdef MICROCHIP_MPLAB_HARMONY
-    word32 bytes;
+#ifndef WOLFMQTT_TEST_NONBLOCK_TIMES
+    #define WOLFMQTT_TEST_NONBLOCK_TIMES 1
 #endif
-#if defined(WOLFMQTT_MULTITHREAD) && defined(WOLFMQTT_ENABLE_STDIN_CAP)
-    /* "self pipe" -> signal wake sleep() */
-    SOCKET_T pfd[2];
-#endif
-    MQTTCtx* mqttCtx;
-} SocketContext;
 
 /* Private functions */
 
@@ -219,8 +56,10 @@ static int NetConnect(void *context, const char* host, word16 port,
 
     switch (sock->stat) {
     case SOCK_BEGIN:
-        PRINTF("NetConnect: Host %s, Port %u, Timeout %d ms, Use TLS %d",
-            host, port, timeout_ms, mqttCtx->use_tls);
+        if (mqttCtx->debug_on) {
+            PRINTF("NetConnect: Host %s, Port %u, Timeout %d ms, Use TLS %d",
+                host, port, timeout_ms, mqttCtx->use_tls);
+        }
 
         hostIp = FreeRTOS_gethostbyname_a(host, NULL, 0, 0);
         if (hostIp == 0)
@@ -384,6 +223,20 @@ static int NetDisconnect(void *context)
 /* -------------------------------------------------------------------------- */
 #elif defined(MICROCHIP_MPLAB_HARMONY)
 
+static int NetDisconnect(void *context)
+{
+    SocketContext *sock = (SocketContext*)context;
+    if (sock) {
+        if (sock->fd != SOCKET_INVALID) {
+            closesocket(sock->fd);
+            sock->fd = SOCKET_INVALID;
+        }
+
+        sock->stat = SOCK_BEGIN;
+    }
+    return 0;
+}
+
 static int NetConnect(void *context, const char* host, word16 port,
     int timeout_ms)
 {
@@ -398,9 +251,10 @@ static int NetConnect(void *context, const char* host, word16 port,
     switch(sock->stat) {
         case SOCK_BEGIN:
         {
-            PRINTF("NetConnect: Host %s, Port %u, Timeout %d ms, Use TLS %d",
-                host, port, timeout_ms, mqttCtx->use_tls);
-
+            if (mqttCtx->debug_on) {
+                PRINTF("NetConnect: Host %s, Port %u, Timeout %d ms, "
+                        "Use TLS %d", host, port, timeout_ms, mqttCtx->use_tls);
+            }
             XMEMSET(&hints, 0, sizeof(hints));
             hints.ai_family = AF_INET;
             hints.ai_socktype = SOCK_STREAM;
@@ -451,6 +305,7 @@ exit:
         if (errno == EINPROGRESS || errno == EWOULDBLOCK) {
             return MQTT_CODE_CONTINUE;
         }
+        NetDisconnect(context);
 
         /* Show error */
         PRINTF("NetConnect: Rc=%d, ErrNo=%d", rc, errno);
@@ -522,17 +377,789 @@ static int NetRead(void *context, byte* buf, int buf_len,
     return rc;
 }
 
+
+/* -------------------------------------------------------------------------- */
+/* NETX SOCKET BACKEND EXAMPLE */
+/* -------------------------------------------------------------------------- */
+#elif defined(HAVE_NETX)
+
 static int NetDisconnect(void *context)
 {
     SocketContext *sock = (SocketContext*)context;
     if (sock) {
-        if (sock->fd != SOCKET_INVALID) {
-            closesocket(sock->fd);
-            sock->fd = SOCKET_INVALID;
-        }
+        nx_tcp_socket_disconnect(&sock->fd, NX_NO_WAIT);
+        nx_tcp_socket_delete(&sock->fd);
 
         sock->stat = SOCK_BEGIN;
     }
+    return 0;
+}
+
+static int NetConnect(void *context, const char* host, word16 port,
+    int timeout_ms)
+{
+    SocketContext *sock = (SocketContext*)context;
+    int rc = MQTT_CODE_ERROR_NETWORK;
+    MQTTCtx* mqttCtx = sock->mqttCtx;
+    UINT status;
+    NXD_ADDRESS ipAddress;
+    UINT  ticks;
+
+    /* Get address information for host and locate IPv4 */
+    switch(sock->stat) {
+        case SOCK_BEGIN:
+        {
+            if (mqttCtx->debug_on) {
+                PRINTF("NetConnect: Host %s, Port %u, Timeout %d ms, "
+                        "Use TLS %d", host, port, timeout_ms, mqttCtx->use_tls);
+            }
+    #ifndef WOLFMQTT_NO_NETX_DNS
+            if (sock->dnsPtr == NULL) {
+                PRINTF("DNS pointer was NULL and needs set, sock->dnsPtr");
+                return MQTT_CODE_ERROR_NETWORK;
+            }
+
+            /* Convert hostname to IP address using NETX DUO DNS */
+            status = nxd_dns_host_by_name_get(sock->dnsPtr, (UCHAR *)host,
+                &ipAddress, timeout_ms, NX_IP_VERSION_V4);
+            if (status != NX_SUCCESS) {
+                PRINTF("DNS lookup failed: %d", status);
+                return MQTT_CODE_ERROR_NETWORK;
+            }
+    #else
+            PRINTF("DNS lookup not available");
+            return MQTT_CODE_ERROR_NETWORK;
+    #endif
+            status = nx_tcp_socket_create(sock->ipPtr, &sock->fd,
+                                           (CHAR*)"MQTT Socket", NX_IP_NORMAL,
+                                           NX_FRAGMENT_OKAY, NX_IP_TIME_TO_LIVE,
+                                           1024, NX_NULL, NX_NULL);
+            if (status != NX_SUCCESS) {
+                PRINTF("Socket create failed: %d", status);
+                return MQTT_CODE_ERROR_NETWORK;
+            }
+
+            /* Bind the socket to a local port */
+            status = nx_tcp_client_socket_bind(&sock->fd, port, timeout_ms);
+            if (status != NX_SUCCESS) {
+                PRINTF("Socket bind failed: %d", status);
+                return MQTT_CODE_ERROR_NETWORK;
+            }
+
+            sock->stat = SOCK_CONN;
+        }
+        FALL_THROUGH;
+
+        case SOCK_CONN:
+        {
+            /* Convert timeout_ms to ticks and round up */
+            ticks = (timeout_ms * TX_TIMER_TICKS_PER_SECOND + 999) / 1000;
+
+            /* Connect to server using NETX DUO */
+            status = nxd_tcp_client_socket_connect(&sock->fd, &ipAddress, port,
+                ticks);
+            if (status != NX_SUCCESS) {
+                PRINTF("Socket connect failed: %d", status);
+                NetDisconnect(context);
+                return MQTT_CODE_ERROR_NETWORK;
+            }
+            return MQTT_CODE_SUCCESS;
+        }
+
+        default:
+            rc = MQTT_CODE_ERROR_BAD_ARG;
+            break;
+    } /* switch */
+
+    return rc;
+}
+
+
+static int NetWrite(void *context, const byte* buf, int buf_len, int timeout_ms)
+{
+    SocketContext *sock = (SocketContext*)context;
+    NX_PACKET*      packet;
+    NX_PACKET_POOL* pool;   /* shorthand */
+    UINT            status;
+    UINT            ticks;
+
+    if (sock == NULL) {
+        PRINTF("NetX Send NULL parameters");
+        return MQTT_CODE_ERROR_BAD_ARG;
+    }
+
+    pool = sock->fd.nx_tcp_socket_ip_ptr->nx_ip_default_packet_pool;
+    status = nx_packet_allocate(pool, &packet, NX_TCP_PACKET, timeout_ms);
+    if (status != NX_SUCCESS) {
+        PRINTF("NetX Send packet alloc error");
+        return MQTT_CODE_ERROR_NETWORK;
+    }
+
+    status = nx_packet_data_append(packet, (VOID*)buf, buf_len, pool,
+        timeout_ms);
+    if (status != NX_SUCCESS) {
+        nx_packet_release(packet);
+        PRINTF("NetX Send data append error");
+        return MQTT_CODE_ERROR_NETWORK;
+    }
+
+
+    /* Convert timeout_ms to ticks and round up */
+    ticks = (timeout_ms * TX_TIMER_TICKS_PER_SECOND + 999) / 1000;
+
+    status = nx_tcp_socket_send(&sock->fd, packet, ticks);
+    if (status != NX_SUCCESS) {
+        nx_packet_release(packet);
+        PRINTF("NetX Send socket send error");
+        return MQTT_CODE_ERROR_NETWORK;
+    }
+
+    return buf_len;
+}
+
+
+static int NetRead(void *context, byte* buf, int buf_len, int timeout_ms)
+{
+    SocketContext *sock = (SocketContext*)context;
+    ULONG left;
+    ULONG total;
+    ULONG copied = 0;
+    UINT  status;
+    UINT  ticks;
+
+    if (sock == NULL) {
+        PRINTF("NetX Recv NULL parameters");
+        return MQTT_CODE_ERROR_BAD_ARG;
+    }
+
+    if (sock->nxPacket == NULL) {
+        /* Convert timeout_ms to ticks and round up */
+        ticks = (timeout_ms * TX_TIMER_TICKS_PER_SECOND + 999) / 1000;
+        status = nx_tcp_socket_receive(&sock->fd, &sock->nxPacket, ticks);
+        if (status != NX_SUCCESS) {
+            if (status == NX_NO_PACKET) {
+                PRINTF("NetX Recv timeout");
+                return MQTT_CODE_ERROR_TIMEOUT;
+            }
+            PRINTF("NetX Recv receive error");
+            return MQTT_CODE_ERROR_NETWORK;
+        }
+    }
+
+    if (sock->nxPacket) {
+        status = nx_packet_length_get(sock->nxPacket, &total);
+        if (status != NX_SUCCESS) {
+            PRINTF("NetX Recv length get error");
+            return MQTT_CODE_ERROR_NETWORK;
+        }
+
+        left = total - sock->nxOffset;
+            status = nx_packet_data_extract_offset(sock->nxPacket,
+                sock->nxOffset, buf, buf_len, &copied);
+        if (status != NX_SUCCESS) {
+            PRINTF("NetX Recv data extract offset error");
+            return MQTT_CODE_ERROR_NETWORK;
+        }
+
+        sock->nxOffset += copied;
+
+        if (copied == left) {
+            PRINTF("NetX Recv Drained packet");
+            nx_packet_release(sock->nxPacket);
+            sock->nxPacket = NULL;
+            sock->nxOffset = 0;
+        }
+    }
+
+    return copied;
+}
+
+
+/* -------------------------------------------------------------------------- */
+/* CURL EASY SOCKET BACKEND EXAMPLE */
+/* -------------------------------------------------------------------------- */
+#elif defined(ENABLE_MQTT_CURL)
+
+/* How many times to retry after a timeout. */
+#define MQTT_CURL_NUM_RETRY (3)
+
+#if defined(WOLFMQTT_NONBLOCK) && defined(WOLFMQTT_TEST_NONBLOCK)
+/* Tells the calling function to either return early with
+ * MQTT_CODE_CONTINUE, or proceed with a smaller buffer read/write.
+ * Used for testing nonblocking. */
+static int
+mqttcurl_test_nonblock_read(int* buf_len)
+{
+    static int testNbReadAlt = 0;
+    static int testSmallerRead = 0;
+
+    if (testNbReadAlt < WOLFMQTT_TEST_NONBLOCK_TIMES) {
+        testNbReadAlt++;
+        #if defined(WOLFMQTT_DEBUG_SOCKET)
+        PRINTF("mqttcurl_test_nonblock_read: returning early with CONTINUE");
+        #endif
+        return MQTT_CODE_CONTINUE;
+    }
+
+    testNbReadAlt = 0;
+
+    if (!testSmallerRead) {
+        if (*buf_len > 2) {
+            *buf_len /= 2;
+            testSmallerRead = 1;
+        #if defined(WOLFMQTT_DEBUG_SOCKET)
+            PRINTF("mqttcurl_test_nonblock_read: testing small buff: %d",
+                   *buf_len);
+        #endif
+        }
+    }
+    else {
+        testSmallerRead = 0;
+    }
+
+    return MQTT_CODE_SUCCESS;
+}
+
+static int
+mqttcurl_test_nonblock_write(int* buf_len)
+{
+    static int testNbWriteAlt = 0;
+    static int testSmallerWrite = 0;
+
+    if (testNbWriteAlt < WOLFMQTT_TEST_NONBLOCK_TIMES) {
+        testNbWriteAlt++;
+        #if defined(WOLFMQTT_DEBUG_SOCKET)
+        PRINTF("mqttcurl_test_nonblock_write: returning early with CONTINUE");
+        #endif
+        return MQTT_CODE_CONTINUE;
+    }
+
+    testNbWriteAlt = 0;
+
+    if (!testSmallerWrite) {
+        if (*buf_len > 2) {
+            *buf_len /= 2;
+            testSmallerWrite = 1;
+        #if defined(WOLFMQTT_DEBUG_SOCKET)
+            PRINTF("mqttcurl_test_nonblock_write: testing small buff: %d",
+                   *buf_len);
+        #endif
+        }
+    }
+    else {
+        testSmallerWrite = 0;
+    }
+
+    return MQTT_CODE_SUCCESS;
+}
+
+#endif /* WOLFMQTT_NONBLOCK && WOLFMQTT_TEST_NONBLOCK */
+
+static int
+mqttcurl_wait(curl_socket_t sockfd, int for_recv, int timeout_ms,
+              int test_mode)
+{
+    struct timeval tv;
+    fd_set         infd;
+    fd_set         outfd;
+    fd_set         errfd;
+    int            rc = 0;
+
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (int)(timeout_ms % 1000) * 1000;
+
+    FD_ZERO(&infd);
+    FD_ZERO(&outfd);
+    FD_ZERO(&errfd);
+
+    FD_SET(sockfd, &errfd);
+
+    if (for_recv) {
+        FD_SET(sockfd, &infd);
+        #ifdef WOLFMQTT_ENABLE_STDIN_CAP
+        if (!test_mode) {
+            FD_SET(STDIN, &infd);
+        }
+        #endif /* WOLFMQTT_ENABLE_STDIN_CAP */
+    }
+    else {
+        FD_SET(sockfd, &outfd);
+    }
+
+    rc = select((int)sockfd + 1, &infd, &outfd, &errfd, &tv);
+
+    if (rc > 0) {
+        if (for_recv && FD_ISSET(sockfd, &infd)) {
+            return MQTT_CODE_CONTINUE;
+        }
+        else if (!for_recv && FD_ISSET(sockfd, &outfd)) {
+            return MQTT_CODE_CONTINUE;
+        }
+        #ifdef WOLFMQTT_ENABLE_STDIN_CAP
+        else if (for_recv && !test_mode && FD_ISSET(STDIN, &infd)) {
+            return MQTT_CODE_STDIN_WAKE;
+        }
+        #endif /* WOLFMQTT_ENABLE_STDIN_CAP */
+        else if (FD_ISSET(sockfd, &errfd)) {
+            return MQTT_CODE_ERROR_NETWORK;
+        }
+    }
+    else if (rc == 0) {
+        return MQTT_CODE_ERROR_TIMEOUT;
+    }
+
+    #ifndef WOLFMQTT_ENABLE_STDIN_CAP
+    (void)test_mode;
+    #endif
+
+    return MQTT_CODE_ERROR_NETWORK;
+}
+
+static int
+mqttcurl_connect(SocketContext* sock, const char* host, word16 port,
+    int timeout_ms)
+{
+    CURLcode res = CURLE_OK;
+
+    if (sock == NULL || sock->curl == NULL) {
+        return MQTT_CODE_ERROR_BAD_ARG;
+    }
+
+#ifdef DEBUG_WOLFMQTT
+    res = curl_easy_setopt(sock->curl, CURLOPT_VERBOSE, 1L);
+
+    if (res != CURLE_OK) {
+        PRINTF("error: curl_easy_setopt(VERBOSE, 1L) returned: %d, %s",
+               res, curl_easy_strerror(res));
+        return MQTT_CODE_ERROR_CURL;
+    }
+#endif
+
+    if (timeout_ms != 0) {
+        res = curl_easy_setopt(sock->curl, CURLOPT_CONNECTTIMEOUT_MS,
+                               timeout_ms);
+
+        if (res != CURLE_OK) {
+            PRINTF("error: curl_easy_setopt(CONNECTTIMEOUT_MS, %d) "
+                   "returned %d", timeout_ms, res);
+            return MQTT_CODE_ERROR_CURL;
+        }
+
+        res = curl_easy_setopt(sock->curl, CURLOPT_TIMEOUT_MS,
+                               timeout_ms);
+
+        if (res != CURLE_OK) {
+            PRINTF("error: curl_easy_setopt(TIMEOUT_MS, %d) "
+                   "returned %d", timeout_ms, res);
+            return MQTT_CODE_ERROR_CURL;
+        }
+    }
+
+    res = curl_easy_setopt(sock->curl, CURLOPT_URL, host);
+
+    if (res != CURLE_OK) {
+        PRINTF("error: curl_easy_setopt(URL, %s) returned: %d",
+               host, res);
+        return MQTT_CODE_ERROR_CURL;
+    }
+
+    res = curl_easy_setopt(sock->curl, CURLOPT_PORT, port);
+
+    if (res != CURLE_OK) {
+        PRINTF("error: curl_easy_setopt(PORT, %d) returned: %d",
+               port, res);
+        return MQTT_CODE_ERROR_CURL;
+    }
+
+    #ifdef ENABLE_MQTT_TLS
+    if (sock->mqttCtx->use_tls) {
+        /* Set TLS specific options. */
+        res = curl_easy_setopt(sock->curl, CURLOPT_SSLVERSION,
+                               CURL_SSLVERSION_TLSv1_2);
+
+        if (res != CURLE_OK) {
+            PRINTF("error: curl_easy_setopt(SSLVERSION) returned: %d",
+                   res);
+            return MQTT_CODE_ERROR_CURL;
+        }
+
+        /* With CURLOPT_CONNECT_ONLY this means do TLS by default. */
+        res = curl_easy_setopt(sock->curl, CURLOPT_DEFAULT_PROTOCOL,
+                               "https");
+
+        if (res != CURLE_OK) {
+            PRINTF("error: curl_easy_setopt(DEFAULT_PROTOCOL) returned: %d",
+                   res);
+            return MQTT_CODE_ERROR_CURL;
+        }
+
+        /* Set path to Certificate Authority (CA) file bundle. */
+        if (sock->mqttCtx->ca_file != NULL) {
+            res = curl_easy_setopt(sock->curl, CURLOPT_CAINFO,
+                                   sock->mqttCtx->ca_file);
+
+            if (res != CURLE_OK) {
+                PRINTF("error: curl_easy_setopt(CAINFO) returned: %d",
+                       res);
+                return MQTT_CODE_ERROR_CURL;
+            }
+        }
+
+        /* Set path to mutual TLS keyfile. */
+        if (sock->mqttCtx->mtls_keyfile != NULL) {
+            res = curl_easy_setopt(sock->curl, CURLOPT_SSLKEY,
+                                   sock->mqttCtx->mtls_keyfile);
+
+            if (res != CURLE_OK) {
+                PRINTF("error: curl_easy_setopt(CURLOPT_SSLKEY) returned: %d",
+                       res);
+                return MQTT_CODE_ERROR_CURL;
+            }
+        }
+
+        /* Set path to mutual TLS certfile. */
+        if (sock->mqttCtx->mtls_certfile != NULL) {
+            res = curl_easy_setopt(sock->curl, CURLOPT_SSLCERT,
+                                   sock->mqttCtx->mtls_certfile);
+
+            if (res != CURLE_OK) {
+                PRINTF("error: curl_easy_setopt(CURLOPT_SSLCERT) returned: %d",
+                       res);
+                return MQTT_CODE_ERROR_CURL;
+            }
+        }
+
+        /* Set path to dir holding CA files.
+         * Unused at the moment. */
+        /*
+        if (sock->mqttCtx->ca_path != NULL) {
+            res = curl_easy_setopt(sock->curl, CURLOPT_CAPATH,
+                                   sock->mqttCtx->ca_path);
+
+            if (res != CURLE_OK) {
+                PRINTF("error: curl_easy_setopt(CAPATH) returned: %d",
+                       res);
+                return MQTT_CODE_ERROR_CURL;
+            }
+        }
+        */
+
+        /* Set peer and host verification. */
+        res = curl_easy_setopt(sock->curl, CURLOPT_SSL_VERIFYPEER, 1);
+
+        if (res != CURLE_OK) {
+            PRINTF("error: curl_easy_setopt(SSL_VERIFYPEER) returned: %d",
+                   res);
+            return MQTT_CODE_ERROR_CURL;
+        }
+
+        /* Only do server host verification when not running against
+         * localhost broker. */
+        if (XSTRCMP(host, "localhost") == 0) {
+            res = curl_easy_setopt(sock->curl, CURLOPT_SSL_VERIFYHOST, 0);
+        }
+        else {
+            res = curl_easy_setopt(sock->curl, CURLOPT_SSL_VERIFYHOST, 2);
+        }
+
+        if (res != CURLE_OK) {
+            PRINTF("error: curl_easy_setopt(SSL_VERIFYHOST) returned: %d",
+                   res);
+            return MQTT_CODE_ERROR_CURL;
+        }
+    }
+    #endif /* ENABLE_MQTT_TLS */
+
+    #if 0
+    /* Set proxy options.
+     * Unused at the moment. */
+    if (sock->mqttCtx->use_proxy) {
+        /* Set the proxy hostname or ip address string. Append
+         * ":[port num]" to the string to specify a port. */
+        res = curl_easy_setopt(sock->curl, CURLOPT_PROXY,
+                               sock->mqttCtx->proxy_str);
+
+        if (res != CURLE_OK) {
+            PRINTF("error: curl_easy_setopt(CURLOPT_PROXY, %s) returned: %d",
+                   res, sock->mqttCtx->proxy_str);
+            return MQTT_CODE_ERROR_CURL;
+        }
+
+        /* Set the proxy type. E.g. CURLPROXY_HTTP, CURLPROXY_HTTPS,
+         * CURLPROXY_HTTPS2, etc. */
+        res = curl_easy_setopt(sock->curl, CURLOPT_PROXYTYPE,
+                               CURLPROXY_HTTP);
+
+        if (res != CURLE_OK) {
+            PRINTF("error: curl_easy_setopt(CURLOPT_PROXYTYPE) returned: %d",
+                   res);
+            return MQTT_CODE_ERROR_CURL;
+        }
+    }
+    #endif
+
+    res = curl_easy_setopt(sock->curl, CURLOPT_CONNECT_ONLY, 1);
+
+    if (res != CURLE_OK) {
+        PRINTF("error: curl_easy_setopt(CONNECT_ONLY, 1) returned: %d",
+               res);
+        return MQTT_CODE_ERROR_CURL;
+    }
+
+    /* Finally do the connection. */
+    res = curl_easy_perform(sock->curl);
+
+    if (res != CURLE_OK) {
+        PRINTF("error: curl_easy_perform returned: %d, %s", res,
+               curl_easy_strerror(res));
+        return MQTT_CODE_ERROR_CURL;
+    }
+
+    return MQTT_CODE_SUCCESS;
+}
+
+static int NetConnect(void *context, const char* host, word16 port,
+    int timeout_ms)
+{
+    SocketContext * sock = (SocketContext*)context;
+    int             rc = 0;
+
+    if (context == NULL || host == NULL || *host == '\0') {
+        return MQTT_CODE_ERROR_BAD_ARG;
+    }
+
+    if (sock->mqttCtx == NULL) {
+        return MQTT_CODE_ERROR_BAD_ARG;
+    }
+
+#if defined(WOLFMQTT_DEBUG_SOCKET)
+    PRINTF("NetConnect: Host %s, Port %u, Timeout %d ms, Use TLS %d",
+           host, port, timeout_ms, sock->mqttCtx->use_tls);
+#endif
+
+    sock->curl = curl_easy_init();
+
+    if (sock->curl == NULL) {
+        PRINTF("error: curl_easy_init returned NULL");
+        return MQTT_CODE_ERROR_MEMORY;
+    }
+
+    rc = mqttcurl_connect(sock, host, port, timeout_ms);
+
+    if (rc != MQTT_CODE_SUCCESS) {
+        curl_easy_cleanup(sock->curl);
+        sock->curl = NULL;
+        return rc;
+    }
+
+    sock->stat = SOCK_CONN;
+    return MQTT_CODE_SUCCESS;
+}
+
+static int NetWrite(void *context, const byte* buf, int buf_len,
+    int timeout_ms)
+{
+    CURLcode        res = CURLE_OK;
+    SocketContext * sock = (SocketContext*)context;
+    size_t          sent = 0;
+    curl_socket_t   sockfd = 0;
+    int             wait_rc = 0;
+
+    if (context == NULL || buf == NULL || buf_len <= 0) {
+        return MQTT_CODE_ERROR_BAD_ARG;
+    }
+
+#if defined(WOLFMQTT_NONBLOCK) && defined(WOLFMQTT_TEST_NONBLOCK)
+    if (sock->mqttCtx->useNonBlockMode) {
+        if (mqttcurl_test_nonblock_write(&buf_len)) {
+            return MQTT_CODE_CONTINUE;
+        }
+    }
+#endif /* WOLFMQTT_NONBLOCK && WOLFMQTT_TEST_NONBLOCK */
+
+    /* get the active socket from libcurl */
+    res = curl_easy_getinfo(sock->curl, CURLINFO_ACTIVESOCKET, &sockfd);
+    if (res != CURLE_OK) {
+        PRINTF("error: curl_easy_getinfo(CURLINFO_ACTIVESOCKET) returned %d",
+               res);
+        return MQTT_CODE_ERROR_CURL;
+    }
+
+    /* check it makes sense */
+    if (sockfd <= 0) {
+        PRINTF("error: libcurl sockfd: %d", sockfd);
+        return MQTT_CODE_ERROR_CURL;
+    }
+
+#if defined(WOLFMQTT_DEBUG_SOCKET)
+    PRINTF("sock->curl = %p, sockfd = %d", (void *)sock->curl, sockfd);
+#endif
+
+    /* A very simple retry with timeout example. This assumes the entire
+     * payload will be transferred in a single shot without buffering.
+     * todo: add buffering? */
+    for (size_t i = 0; i < MQTT_CURL_NUM_RETRY; ++i) {
+    #ifdef WOLFMQTT_MULTITHREAD
+        int rc = wm_SemLock(&sock->mqttCtx->client.lockCURL);
+        if (rc != 0) {
+            return rc;
+        }
+    #endif
+
+        res = curl_easy_send(sock->curl, buf, buf_len, &sent);
+
+    #ifdef WOLFMQTT_MULTITHREAD
+        wm_SemUnlock(&sock->mqttCtx->client.lockCURL);
+    #endif
+
+        if (res == CURLE_OK) {
+            #if defined(WOLFMQTT_DEBUG_SOCKET)
+            PRINTF("info: curl_easy_send(%d) returned: %d, %s", buf_len, res,
+                   curl_easy_strerror(res));
+            #endif
+            break;
+        }
+
+        if (res == CURLE_AGAIN) {
+            #if defined(WOLFMQTT_DEBUG_SOCKET)
+            PRINTF("info: curl_easy_send(%d) returned: %d, %s", buf_len, res,
+                   curl_easy_strerror(res));
+            #endif
+
+            wait_rc = mqttcurl_wait(sockfd, 0, timeout_ms,
+                                    sock->mqttCtx->test_mode);
+
+            if (wait_rc == MQTT_CODE_CONTINUE) {
+                continue;
+            }
+            else {
+                return wait_rc;
+            }
+        }
+
+        PRINTF("error: curl_easy_send(%d) returned: %d, %s", buf_len, res,
+               curl_easy_strerror(res));
+        return MQTT_CODE_ERROR_CURL;
+    }
+
+    if ((int) sent != buf_len) {
+        PRINTF("error: sent %d bytes, expected %d", (int)sent, buf_len);
+        return MQTT_CODE_ERROR_CURL;
+    }
+
+    return buf_len;
+}
+
+static int NetRead(void *context, byte* buf, int buf_len,
+    int timeout_ms)
+{
+    CURLcode        res = CURLE_OK;
+    SocketContext * sock = (SocketContext*)context;
+    size_t          recvd = 0;
+    curl_socket_t   sockfd = 0;
+    int             wait_rc = 0;
+
+    if (context == NULL || buf == NULL || buf_len <= 0) {
+        return MQTT_CODE_ERROR_BAD_ARG;
+    }
+
+#if defined(WOLFMQTT_NONBLOCK) && defined(WOLFMQTT_TEST_NONBLOCK)
+    if (sock->mqttCtx->useNonBlockMode) {
+        if (mqttcurl_test_nonblock_read(&buf_len)) {
+            return MQTT_CODE_CONTINUE;
+        }
+    }
+#endif /* WOLFMQTT_NONBLOCK && WOLFMQTT_TEST_NONBLOCK */
+
+    /* get the active socket from libcurl */
+    res = curl_easy_getinfo(sock->curl, CURLINFO_ACTIVESOCKET, &sockfd);
+    if (res != CURLE_OK) {
+        PRINTF("error: curl_easy_getinfo(CURLINFO_ACTIVESOCKET) returned %d",
+               res);
+        return MQTT_CODE_ERROR_CURL;
+    }
+
+    /* check it makes sense */
+    if (sockfd <= 0) {
+        PRINTF("error: libcurl sockfd: %d", sockfd);
+        return MQTT_CODE_ERROR_CURL;
+    }
+
+#if defined(WOLFMQTT_DEBUG_SOCKET)
+    PRINTF("sock->curl = %p, sockfd = %d", (void *)sock->curl, sockfd);
+#endif
+
+    /* A very simple retry with timeout example. This assumes the entire
+     * payload will be transferred in a single shot without buffering.
+     * todo: add buffering? */
+    for (size_t i = 0; i < MQTT_CURL_NUM_RETRY; ++i) {
+    #ifdef WOLFMQTT_MULTITHREAD
+        int rc = wm_SemLock(&sock->mqttCtx->client.lockCURL);
+        if (rc != 0) {
+            return rc;
+        }
+    #endif
+
+        res = curl_easy_recv(sock->curl, buf, buf_len, &recvd);
+
+    #ifdef WOLFMQTT_MULTITHREAD
+        wm_SemUnlock(&sock->mqttCtx->client.lockCURL);
+    #endif
+
+        if (res == CURLE_OK) {
+            #if defined(WOLFMQTT_DEBUG_SOCKET)
+            PRINTF("info: curl_easy_recv(%d) returned: %d, %s", buf_len, res,
+                   curl_easy_strerror(res));
+            #endif
+            break;
+        }
+
+        if (res == CURLE_AGAIN) {
+            #if defined(WOLFMQTT_DEBUG_SOCKET)
+            PRINTF("info: curl_easy_recv(%d) returned: %d, %s", buf_len, res,
+                   curl_easy_strerror(res));
+            #endif
+
+            wait_rc = mqttcurl_wait(sockfd, 1, timeout_ms,
+                                    sock->mqttCtx->test_mode);
+
+            if (wait_rc == MQTT_CODE_CONTINUE) {
+                continue;
+            }
+            else {
+                return wait_rc;
+            }
+        }
+
+        PRINTF("error: curl_easy_recv(%d) returned: %d, %s", buf_len, res,
+               curl_easy_strerror(res));
+        return MQTT_CODE_ERROR_CURL;
+    }
+
+    if ((int) recvd != buf_len) {
+        PRINTF("error: recvd %d bytes, expected %d", (int)recvd, buf_len);
+        return MQTT_CODE_ERROR_CURL;
+    }
+
+    return buf_len;
+}
+
+static int NetDisconnect(void *context)
+{
+    SocketContext * sock = (SocketContext*)context;
+
+    if (sock == NULL) {
+        return MQTT_CODE_ERROR_BAD_ARG;
+    }
+
+    if (sock->curl != NULL) {
+#if defined(WOLFMQTT_DEBUG_SOCKET)
+        PRINTF("info: curl_easy_cleanup");
+#endif
+        curl_easy_cleanup(sock->curl);
+        sock->curl = NULL;
+    }
+
     return 0;
 }
 
@@ -542,7 +1169,7 @@ static int NetDisconnect(void *context)
 #else
 
 #ifndef WOLFMQTT_NO_TIMEOUT
-static void setup_timeout(struct timeval* tv, int timeout_ms)
+static void tcp_setup_timeout(struct timeval* tv, int timeout_ms)
 {
     tv->tv_sec = timeout_ms / 1000;
     tv->tv_usec = (timeout_ms % 1000) * 1000;
@@ -552,6 +1179,23 @@ static void setup_timeout(struct timeval* tv, int timeout_ms)
         tv->tv_sec = 0;
         tv->tv_usec = 100;
     }
+}
+
+static void tcp_set_fds(SocketContext* sock, fd_set* recvfds, fd_set* errfds)
+{
+    /* Setup select file descriptors to watch */
+    FD_ZERO(errfds);
+    FD_SET(sock->fd, errfds);
+    FD_ZERO(recvfds);
+    FD_SET(sock->fd, recvfds);
+#ifdef WOLFMQTT_ENABLE_STDIN_CAP
+    #ifdef WOLFMQTT_MULTITHREAD
+        FD_SET(sock->pfd[0], recvfds);
+    #endif
+    if (!sock->mqttCtx->test_mode) {
+        FD_SET(STDIN, recvfds);
+    }
+#endif /* WOLFMQTT_ENABLE_STDIN_CAP */
 }
 
 #ifdef WOLFMQTT_NONBLOCK
@@ -574,6 +1218,20 @@ static void tcp_set_nonblocking(SOCKET_T* sockfd)
 #endif /* WOLFMQTT_NONBLOCK */
 #endif /* !WOLFMQTT_NO_TIMEOUT */
 
+static int NetDisconnect(void *context)
+{
+    SocketContext *sock = (SocketContext*)context;
+    if (sock) {
+        if (sock->fd != SOCKET_INVALID) {
+            SOCK_CLOSE(sock->fd);
+            sock->fd = SOCKET_INVALID;
+        }
+
+        sock->stat = SOCK_BEGIN;
+    }
+    return 0;
+}
+
 static int NetConnect(void *context, const char* host, word16 port,
     int timeout_ms)
 {
@@ -589,8 +1247,10 @@ static int NetConnect(void *context, const char* host, word16 port,
     switch(sock->stat) {
         case SOCK_BEGIN:
         {
-            PRINTF("NetConnect: Host %s, Port %u, Timeout %d ms, Use TLS %d",
-                host, port, timeout_ms, mqttCtx->use_tls);
+            if (mqttCtx->debug_on) {
+                PRINTF("NetConnect: Host %s, Port %u, Timeout %d ms, "
+                        "Use TLS %d", host, port, timeout_ms, mqttCtx->use_tls);
+            }
 
             XMEMSET(&hints, 0, sizeof(hints));
             hints.ai_family = AF_INET;
@@ -650,7 +1310,7 @@ static int NetConnect(void *context, const char* host, word16 port,
             struct timeval tv;
 
             /* Setup timeout and FD's */
-            setup_timeout(&tv, timeout_ms);
+            tcp_setup_timeout(&tv, timeout_ms);
             FD_ZERO(&fdset);
             FD_SET(sock->fd, &fdset);
         #endif /* !WOLFMQTT_NO_TIMEOUT */
@@ -669,8 +1329,10 @@ static int NetConnect(void *context, const char* host, word16 port,
                 /* set default error case */
                 rc = MQTT_CODE_ERROR_NETWORK;
         #ifdef WOLFMQTT_NONBLOCK
-                /* Check for error */
-                GET_SOCK_ERROR(sock->fd, SOL_SOCKET, SO_ERROR, so_error);
+                {
+                    /* Check for error */
+                    GET_SOCK_ERROR(sock->fd, SOL_SOCKET, SO_ERROR, so_error);
+                }
                 if (
             #ifndef _WIN32
                         (errno == EINPROGRESS) ||
@@ -699,9 +1361,9 @@ static int NetConnect(void *context, const char* host, word16 port,
     (void)timeout_ms;
 
 exit:
-    /* Show error */
-    if (rc != 0) {
-        PRINTF("NetConnect: Rc=%d, SoErr=%d", rc, so_error);
+    if ((rc != 0) && (rc != MQTT_CODE_CONTINUE)) {
+        NetDisconnect(context);
+        PRINTF("NetConnect: Rc=%d, SoErr=%d", rc, so_error); /* Show error */
     }
 
     return rc;
@@ -719,7 +1381,7 @@ static int SN_NetConnect(void *context, const char* host, word16 port,
     struct addrinfo hints;
     MQTTCtx* mqttCtx = sock->mqttCtx;
 
-    PRINTF("NetConnect: Host %s, Port %u, Timeout %d ms, Use TLS %d",
+    PRINTF("NetConnect: Host %s, Port %u, Timeout %d ms, Use DTLS %d",
         host, port, timeout_ms, mqttCtx->use_tls);
 
     /* Get address information for host and locate IPv4 */
@@ -776,7 +1438,7 @@ static int SN_NetConnect(void *context, const char* host, word16 port,
         struct timeval tv;
 
         /* Setup timeout and FD's */
-        setup_timeout(&tv, timeout_ms);
+        tcp_setup_timeout(&tv, timeout_ms);
         FD_ZERO(&fdset);
         FD_SET(sock->fd, &fdset);
     #else
@@ -790,8 +1452,8 @@ static int SN_NetConnect(void *context, const char* host, word16 port,
 
   exit:
     /* Show error */
-    if (rc != 0) {
-        SOCK_CLOSE(sock->fd);
+    if ((rc != 0) && (rc != MQTT_CODE_CONTINUE)) {
+        NetDisconnect(context);
         PRINTF("NetConnect: Rc=%d, SoErr=%d", rc, so_error);
     }
 
@@ -803,10 +1465,15 @@ static int NetWrite(void *context, const byte* buf, int buf_len,
     int timeout_ms)
 {
     SocketContext *sock = (SocketContext*)context;
+    MQTTCtx* mqttCtx;
     int rc;
     SOERROR_T so_error = 0;
 #ifndef WOLFMQTT_NO_TIMEOUT
     struct timeval tv;
+#endif
+#if defined(WOLFMQTT_NONBLOCK) && defined(WOLFMQTT_TEST_NONBLOCK)
+    static int testNbWriteAlt = 0;
+    static int testSmallerWrite = 0;
 #endif
 
     if (context == NULL || buf == NULL || buf_len <= 0) {
@@ -816,16 +1483,45 @@ static int NetWrite(void *context, const byte* buf, int buf_len,
     if (sock->fd == SOCKET_INVALID)
         return MQTT_CODE_ERROR_BAD_ARG;
 
+    mqttCtx = sock->mqttCtx;
+    (void)mqttCtx;
+
+#if defined(WOLFMQTT_NONBLOCK) && defined(WOLFMQTT_TEST_NONBLOCK)
+    if (mqttCtx->useNonBlockMode) {
+        if (testNbWriteAlt < WOLFMQTT_TEST_NONBLOCK_TIMES) {
+            testNbWriteAlt++;
+            return MQTT_CODE_CONTINUE;
+        }
+        testNbWriteAlt = 0;
+        if (!testSmallerWrite) {
+            if (buf_len > 2) {
+                buf_len /= 2;
+            }
+            testSmallerWrite = 1;
+        }
+        else {
+            testSmallerWrite = 0;
+        }
+    }
+#endif
+
 #ifndef WOLFMQTT_NO_TIMEOUT
     /* Setup timeout */
-    setup_timeout(&tv, timeout_ms);
-    setsockopt(sock->fd, SOL_SOCKET, SO_SNDTIMEO, (char *)&tv, sizeof(tv));
+    tcp_setup_timeout(&tv, timeout_ms);
+    (void)setsockopt(sock->fd, SOL_SOCKET, SO_SNDTIMEO, (char *)&tv,
+            sizeof(tv));
 #endif
 
     rc = (int)SOCK_SEND(sock->fd, buf, buf_len, 0);
+    #if defined(WOLFMQTT_DEBUG_SOCKET)
+    PRINTF("info: SOCK_SEND(%d) returned %d, buf_len is %d",
+           buf_len, rc, buf_len);
+    #endif
     if (rc == -1) {
-        /* Get error */
-        GET_SOCK_ERROR(sock->fd, SOL_SOCKET, SO_ERROR, so_error);
+        {
+            /* Get error */
+            GET_SOCK_ERROR(sock->fd, SOL_SOCKET, SO_ERROR, so_error);
+        }
         if (so_error == 0) {
     #if defined(USE_WINDOWS_API) && defined(WOLFMQTT_NONBLOCK)
             /* assume non-blocking case */
@@ -854,7 +1550,7 @@ static int NetRead_ex(void *context, byte* buf, int buf_len,
     int timeout_ms, byte peek)
 {
     SocketContext *sock = (SocketContext*)context;
-    MQTTCtx* mqttCtx = sock->mqttCtx;
+    MQTTCtx* mqttCtx;
     int rc = -1, timeout = 0;
     SOERROR_T so_error = 0;
     int bytes = 0;
@@ -863,9 +1559,13 @@ static int NetRead_ex(void *context, byte* buf, int buf_len,
     fd_set recvfds;
     fd_set errfds;
     struct timeval tv;
+#else
+    (void)timeout_ms;
 #endif
-
-    (void)mqttCtx;
+#if defined(WOLFMQTT_NONBLOCK) && defined(WOLFMQTT_TEST_NONBLOCK)
+    static int testNbReadAlt = 0;
+    static int testSmallerRead = 0;
+#endif
 
     if (context == NULL || buf == NULL || buf_len <= 0) {
         return MQTT_CODE_ERROR_BAD_ARG;
@@ -878,26 +1578,27 @@ static int NetRead_ex(void *context, byte* buf, int buf_len,
         flags |= MSG_PEEK;
     }
 
-#ifndef WOLFMQTT_NO_TIMEOUT
-    /* Setup timeout */
-    setup_timeout(&tv, timeout_ms);
+    mqttCtx = sock->mqttCtx;
+    (void)mqttCtx;
 
-    /* Setup select file descriptors to watch */
-    FD_ZERO(&errfds);
-    FD_SET(sock->fd, &errfds);
-    FD_ZERO(&recvfds);
-    FD_SET(sock->fd, &recvfds);
-    #ifdef WOLFMQTT_ENABLE_STDIN_CAP
-    #ifdef WOLFMQTT_MULTITHREAD
-        FD_SET(sock->pfd[0], &recvfds);
-    #endif
-    if (!mqttCtx->test_mode) {
-        FD_SET(STDIN, &recvfds);
+#if defined(WOLFMQTT_NONBLOCK) && defined(WOLFMQTT_TEST_NONBLOCK)
+    if (mqttCtx->useNonBlockMode) {
+        if (testNbReadAlt < WOLFMQTT_TEST_NONBLOCK_TIMES) {
+            testNbReadAlt++;
+            return MQTT_CODE_CONTINUE;
+        }
+        testNbReadAlt = 0;
+        if (!testSmallerRead) {
+            if (buf_len > 2) {
+                buf_len /= 2;
+            }
+            testSmallerRead = 1;
+        }
+        else {
+            testSmallerRead = 0;
+        }
     }
-    #endif /* WOLFMQTT_ENABLE_STDIN_CAP */
-#else
-    (void)timeout_ms;
-#endif /* !WOLFMQTT_NO_TIMEOUT */
+#endif
 
     /* Loop until buf_len has been read, error or timeout */
     while (bytes < buf_len) {
@@ -906,9 +1607,13 @@ static int NetRead_ex(void *context, byte* buf, int buf_len,
     #ifndef WOLFMQTT_NO_TIMEOUT
         #ifdef WOLFMQTT_NONBLOCK
         if (mqttCtx->useNonBlockMode) {
-        #ifdef WOLFMQTT_ENABLE_STDIN_CAP
+            #ifdef WOLFMQTT_ENABLE_STDIN_CAP
             /* quick no timeout check if data is available on stdin */
-            setup_timeout(&tv, 0);
+            tcp_setup_timeout(&tv, 0);
+
+            /* Setup select file descriptors to watch */
+            tcp_set_fds(sock, &recvfds, &errfds);
+
             rc = select((int)SELECT_FD(sock->fd), &recvfds, NULL, &errfds, &tv);
             if (rc > 0) {
                 if (FD_ISSET(sock->fd, &recvfds)) {
@@ -918,14 +1623,19 @@ static int NetRead_ex(void *context, byte* buf, int buf_len,
                     return MQTT_CODE_STDIN_WAKE;
                 }
             }
-        #else
+            #else
             do_read = 1;
-        #endif
+            #endif
         }
         else
-        #endif
+        #endif /* WOLFMQTT_NONBLOCK */
         {
             /* Wait for rx data to be available */
+            tcp_setup_timeout(&tv, timeout_ms);
+
+            /* Setup select file descriptors to watch */
+            tcp_set_fds(sock, &recvfds, &errfds);
+
             rc = select((int)SELECT_FD(sock->fd), &recvfds, NULL, &errfds, &tv);
             if (rc > 0) {
                 if (FD_ISSET(sock->fd, &recvfds)) {
@@ -957,17 +1667,27 @@ static int NetRead_ex(void *context, byte* buf, int buf_len,
 
         if (do_read) {
             /* Try and read number of buf_len provided,
-                minus what's already been read */
+             * minus what's already been read */
             rc = (int)SOCK_RECV(sock->fd,
                            &buf[bytes],
                            buf_len - bytes,
                            flags);
+            #if defined(WOLFMQTT_DEBUG_SOCKET)
+            PRINTF("info: SOCK_RECV(%d) returned %d, buf_len - bytes is %d",
+                   bytes, rc, buf_len - bytes);
+            #endif
             if (rc <= 0) {
                 rc = -1;
                 goto exit; /* Error */
             }
             else {
                 bytes += rc; /* Data */
+    #ifdef ENABLE_MQTT_TLS
+                if (MqttClient_Flags(&mqttCtx->client, 0, 0)
+                    & MQTT_CLIENT_FLAG_IS_TLS) {
+                    break;
+                }
+    #endif
             }
         }
 
@@ -988,8 +1708,10 @@ exit:
         rc = MQTT_CODE_ERROR_TIMEOUT;
     }
     else if (rc < 0) {
-        /* Get error */
-        GET_SOCK_ERROR(sock->fd, SOL_SOCKET, SO_ERROR, so_error);
+        {
+            /* Get error */
+            GET_SOCK_ERROR(sock->fd, SOL_SOCKET, SO_ERROR, so_error);
+        }
         if (so_error == 0) {
             rc = 0; /* Handle signal */
         }
@@ -1021,20 +1743,6 @@ static int NetPeek(void *context, byte* buf, int buf_len, int timeout_ms)
     return NetRead_ex(context, buf, buf_len, timeout_ms, 1);
 }
 #endif
-
-static int NetDisconnect(void *context)
-{
-    SocketContext *sock = (SocketContext*)context;
-    if (sock) {
-        if (sock->fd != SOCKET_INVALID) {
-            SOCK_CLOSE(sock->fd);
-            sock->fd = -1;
-        }
-
-        sock->stat = SOCK_BEGIN;
-    }
-    return 0;
-}
 
 #endif
 
@@ -1092,7 +1800,12 @@ int MqttClientNet_Init(MqttNet* net, MQTTCtx* mqttCtx)
         }
         net->context = sockCtx;
         XMEMSET(sockCtx, 0, sizeof(SocketContext));
+#if defined(ENABLE_MQTT_CURL)
+        sockCtx->curl = NULL;
+#endif
+#if !defined(HAVE_NETX)
         sockCtx->fd = SOCKET_INVALID;
+#endif
         sockCtx->stat = SOCK_BEGIN;
         sockCtx->mqttCtx = mqttCtx;
 

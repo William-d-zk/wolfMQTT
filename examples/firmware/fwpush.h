@@ -1,6 +1,6 @@
 /* fwpush.h
  *
- * Copyright (C) 2006-2022 wolfSSL Inc.
+ * Copyright (C) 2006-2025 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -33,9 +33,13 @@ typedef struct FwpushCBdata_s {
     const char *filename;
     byte *data;
     FILE *fp;
-}FwpushCBdata;
+} FwpushCBdata;
 
 /* Exposed functions */
 int fwpush_test(MQTTCtx *mqttCtx);
+
+#if defined(NO_MAIN_DRIVER)
+int fwpush_main(int argc, char** argv);
+#endif
 
 #endif /* WOLFMQTT_FWPUSH_H */

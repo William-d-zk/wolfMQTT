@@ -36,6 +36,7 @@ include wolfmqtt/include.am
 include examples/include.am
 include scripts/include.am
 include IDE/include.am
+include cmake/include.am
 
 EXTRA_DIST+= README.md
 EXTRA_DIST+= ChangeLog.md
@@ -105,3 +106,15 @@ merge-clean:
 	@find ./ | $(GREP) \.OTHER | xargs rm -f
 	@find ./ | $(GREP) \.BASE | xargs rm -f
 	@find ./ | $(GREP) \~$$ | xargs rm -f
+
+# Make sure these directories exist
+dist-hook:
+	$(MKDIR_P) $(distdir)/examples/mqttsimple
+	$(MKDIR_P) $(distdir)/examples/aws
+	$(MKDIR_P) $(distdir)/examples/azure
+	$(MKDIR_P) $(distdir)/examples/firmware
+	$(MKDIR_P) $(distdir)/examples/wiot
+	$(MKDIR_P) $(distdir)/examples/nbclient
+	$(MKDIR_P) $(distdir)/examples/multithread
+	$(MKDIR_P) $(distdir)/examples/pub-sub
+	$(MKDIR_P) $(distdir)/examples/websocket

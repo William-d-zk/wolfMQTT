@@ -1,6 +1,6 @@
 /* sn-multithread.c
  *
- * Copyright (C) 2006-2022 wolfSSL Inc.
+ * Copyright (C) 2006-2025 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -36,7 +36,9 @@
 /* Configuration */
 
 /* Maximum size for network read/write callbacks. */
+#ifndef MAX_BUFFER_SIZE
 #define MAX_BUFFER_SIZE 1024
+#endif
 #define TEST_MESSAGE    "test00"
 /* Number of publish tasks. Each will send a unique message to the broker. */
 #define NUM_PUB_TASKS   10
@@ -77,10 +79,11 @@ static MQTTCtx gMqttCtx;
 
 static word16 mqtt_get_packetid_threadsafe(void)
 {
-    word16 packet_id;
-    wm_SemLock(&packetIdLock);
-    packet_id = mqtt_get_packetid();
-    wm_SemUnlock(&packetIdLock);
+    word16 packet_id = 0;
+    if (wm_SemLock(&packetIdLock) == 0) {
+        packet_id = mqtt_get_packetid();
+        wm_SemUnlock(&packetIdLock);
+    }
     return packet_id;
 }
 
@@ -241,7 +244,9 @@ static int multithread_test_init(MQTTCtx *mqttCtx)
         wm_SemFree(&packetIdLock);
         client_exit(mqttCtx);
     }
-    wm_SemLock(&pingSignal); /* default to locked */
+    if (wm_SemLock(&pingSignal) != 0) { /* default to locked */
+        client_exit(mqttCtx);
+    }
 
     PRINTF("MQTT-SN Client: QoS %d, Use TLS %d", mqttCtx->qos,
             mqttCtx->use_tls);
@@ -516,7 +521,9 @@ static void *ping_task(void *param)
     XMEMSET(&ping, 0, sizeof(ping));
 
     do {
-        wm_SemLock(&pingSignal);
+        if (wm_SemLock(&pingSignal) != 0)
+            break;
+
         if (mStopRead)
             break;
 
@@ -604,7 +611,6 @@ int sn_multithread_test(MQTTCtx *mqttCtx)
 #endif /* WOLFMQTT_MULTITHREAD && WOLFMQTT_SN */
 
 /* so overall tests can pull in test function */
-#if !defined(NO_MAIN_DRIVER) && !defined(MICROCHIP_MPLAB_HARMONY)
     #ifdef USE_WINDOWS_API
         #include <windows.h> /* for ctrl handler */
 
@@ -635,7 +641,11 @@ int sn_multithread_test(MQTTCtx *mqttCtx)
         }
     #endif
 
+#if defined(NO_MAIN_DRIVER)
+int sn_multithread_main(int argc, char** argv)
+#else
 int main(int argc, char** argv)
+#endif
 {
     int rc;
 #if defined(WOLFMQTT_MULTITHREAD) && defined(WOLFMQTT_SN)
@@ -683,4 +693,3 @@ int main(int argc, char** argv)
     return (rc == 0) ? 0 : EXIT_FAILURE;
 }
 
-#endif /* NO_MAIN_DRIVER */

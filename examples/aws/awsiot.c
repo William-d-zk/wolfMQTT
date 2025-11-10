@@ -1,6 +1,6 @@
 /* awsiot.c
  *
- * Copyright (C) 2006-2022 wolfSSL Inc.
+ * Copyright (C) 2006-2025 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -27,26 +27,17 @@
 #include "wolfmqtt/mqtt_client.h"
 
 
-/* This example only works with ENABLE_MQTT_TLS (wolfSSL library) */
-/* Notes:
- *
- *  The "wc_GetTime" API was added in 3.9.1 and if not present you'll need to implement
- *  your own version of this to get current UTC seconds or update your wolfSSL library
-*/
-
-/* This example requires features in wolfSSL 3.9.1 or later */
-#if defined(ENABLE_MQTT_TLS)
+/* This example only works with ENABLE_MQTT_TLS (wolfSSL library),
+ * and without ENABLE_MQTT_CURL. */
+#if defined(ENABLE_MQTT_TLS) && !defined(ENABLE_MQTT_CURL)
     #if !defined(WOLFSSL_USER_SETTINGS) && !defined(USE_WINDOWS_API)
         #include <wolfssl/options.h>
     #endif
     #include <wolfssl/wolfcrypt/settings.h>
     #include <wolfssl/version.h>
 
-    #if defined(LIBWOLFSSL_VERSION_HEX) && \
-        LIBWOLFSSL_VERSION_HEX >= 0x03009001
-        #undef ENABLE_AWSIOT_EXAMPLE
-        #define ENABLE_AWSIOT_EXAMPLE
-    #endif
+    #undef  ENABLE_AWSIOT_EXAMPLE
+    #define ENABLE_AWSIOT_EXAMPLE
 #endif
 
 
@@ -64,25 +55,29 @@
 
 /* Locals */
 static int mStopRead = 0;
+static int mTestDone = 0;
 
 /* Configuration */
 #define APP_HARDWARE         "wolf_aws_iot_demo"
 #define APP_FIRMWARE_VERSION LIBWOLFMQTT_VERSION_STRING
 
+#ifndef MAX_BUFFER_SIZE
 #define MAX_BUFFER_SIZE         512    /* Maximum size for network read/write callbacks */
-#define AWSIOT_HOST             "a2dujmi05ideo2.iot.us-west-2.amazonaws.com"
+#endif
+#define AWSIOT_HOST             "a2dujmi05ideo2-ats.iot.us-west-2.amazonaws.com"
 #define AWSIOT_DEVICE_ID        "demoDevice"
 #define AWSIOT_QOS              MQTT_QOS_1
 #define AWSIOT_KEEP_ALIVE_SEC   DEFAULT_KEEP_ALIVE_SEC
 #define AWSIOT_CMD_TIMEOUT_MS   DEFAULT_CMD_TIMEOUT_MS
 
-#define AWSIOT_SUBSCRIBE_TOPIC  "$aws/things/" AWSIOT_DEVICE_ID "/shadow/update/delta"
 #define AWSIOT_PUBLISH_TOPIC    "$aws/things/" AWSIOT_DEVICE_ID "/shadow/update"
+#define AWSIOT_SUBSCRIBE_TOPIC  AWSIOT_PUBLISH_TOPIC
+
 
 #define AWSIOT_PUBLISH_MSG_SZ   400
 
 /* Demo Certificates */
-static const char* root_ca =
+WOLFMQTT_EXAMPLE_CERT const char* root_ca =
 "-----BEGIN CERTIFICATE-----\n"
 "MIIE0zCCA7ugAwIBAgIQGNrRniZ96LtKIVjNzGs7SjANBgkqhkiG9w0BAQUFADCB\n"
 "yjELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDlZlcmlTaWduLCBJbmMuMR8wHQYDVQQL\n"
@@ -125,7 +120,8 @@ static const char* device_pub_key =
 "-----END PUBLIC KEY-----";
 #endif
 
-static const char* device_priv_key =
+WOLFMQTT_EXAMPLE_CERT const char* device_priv_key =
+#ifndef WOLFSSL_ENCRYPTED_KEYS
 "-----BEGIN RSA PRIVATE KEY-----\n"
 "MIIEpAIBAAKCAQEAqsAKVhbfQEWblC8PvgubqpJasVoCEsSfvLF4b5DIAsoMeieP\n"
 "26y6Vyd3njRyuigSQ6jP+mo3GyqSfeCbqfJ2dx3BNICEk7P46Bu37ewoI24pScnT\n"
@@ -153,8 +149,40 @@ static const char* device_priv_key =
 "5aGgRkmSW/Fc1ab33Gj2liLXCDN8bziri3KfMW6n9Dxhk8ppue7N5vNpjaoMLU2e\n"
 "tT/aucPRjdDp9JPzZQaewIDz7OG8bJtwLfx25FiR2oWDz2kD02joag==\n"
 "-----END RSA PRIVATE KEY-----";
+#else
+"-----BEGIN ENCRYPTED PRIVATE KEY-----\n"
+"MIIFLTBXBgkqhkiG9w0BBQ0wSjApBgkqhkiG9w0BBQwwHAQIpsU/SSIa4OoCAggA\n"
+"MAwGCCqGSIb3DQIJBQAwHQYJYIZIAWUDBAEqBBDvD4YFDn8hY+f4s88K0duqBIIE\n"
+"0E4TFcEYQYD1ltbYf5xHbEA3j0Vjs/5w9YL4K7JqrR9R7HTlxCFavNl/l7Rga3rk\n"
+"IiAz5cuSYxusUnIkDlBqcB3XQefKkl1G2E1DtExCdo02eDI4EdJ4N4zDLt5wmnL8\n"
+"w10WWMU3ZkRfrD4XPz0cuuBWD5LFI9QKLJ93tUhBQtjtrZSxPG7x2tmD9YotjIiV\n"
+"/PQ5Vd6agIoHyfXdRz9CIMZU25iV1tm5s2WN0JiLW3MH4Zw1bpyGDEoN8EwtnQjc\n"
+"/GN6Z384o4jr+ut8z356ilSESvr6mcxTcDZoO64xWvbIRjWIyRmtv8tMd1Qtamfo\n"
+"6bQCpV3I/dxBfshqPDWk/S1g9NxoPETm/yDz98Jukj8+NoJ2r4w0+y9CWyObBBUX\n"
+"cAiwxluYrP7xKRMunC77WxgD2P1N29N+8QK23YcJnUQJ/TcMXSXb/W/3GbnoHhS+\n"
+"KyUk05fWpswFXxtglGGjxN5wh7uOXSFY3bq/KbO/riHZ++Fwe9vSAUUaRvZUF948\n"
+"alfAMRUBG2r4cIi/kQRdsQQ5icwZwsCTo2W8xvKqw26x145egEx0Jsb27Eoapcvr\n"
+"vOutbe4JXMhKhrGwZohDZ4EgcM5ue7zobYwIo8DKnqTbb6UtgaVoYJm1m/YtCavy\n"
+"X9xz8eXruwI00BXf+9Aj1Ryn7wn0Pcw/EoNjYAHAQB2J8yvI97FPDtwFeXm+abZg\n"
+"sMMoYhQbFRd2G+xPmqltEgMv88C/cYXJGufTvYdBZNmqyZSMVu8YTxpHnM/fOODw\n"
+"yB6sx5VriEkMvh5So7X1xH0UXJ1HI8LGzJKEKNPrSQKZW0KofPsCZsAbgkoDZ/HV\n"
+"ji6uMHgXYbZRJEhYbTnQNE26elniTMkQXa0tw9atbjsFwk609Nbz63KeQWyvnAC+\n"
+"Q3IoXWWt42APNmOBGdg1xRIWolXtmWFMCI58eY9YCJkwUQjWy4vS85waWY2kA8tq\n"
+"4W15XEXYwuhWoyOqNubhkEs+PT+CaEh2M9C4exfBAnTy9fYYx2lm1OC8CX+L8OZU\n"
+"mhOU7EdRuah5wnTEATUu4i2Zm5+R7oF+12QHk5vaoZAbkl4xChVdD44UneREzDLb\n"
+"WV27YlN0RApeFCoYf+BQi8YzBXZahxG4g74Yu7sfjOKJj+VAT3ilLlhKelLBqjlw\n"
+"ZUV9F+mLKo91k3omAr+M4mp72DqH8OiWnhvQaBY1QADrez4kA0krfewHcKosKMMK\n"
+"EIc9zD0FAsBgFCGgmOxyPD9Xu8tbkD7rxJZsEfHxXj3LgO8AYC2e/743D5WivqWR\n"
+"8wNlSn53ED7BuNBTbnaWhfElqqpyPYtUDi3G+R87dv48Yec1xMdUu0aRb65QeerT\n"
+"O2TL6F+KOlKWklBSzibCLBNLTBkXsf1aQb1FxQtGJjrTkA0FEqEvGgGtHHfMoRFq\n"
+"T1kvzEocWJGQv78eCpREl35vho4Aj+0MgUvGPfBlijoWFYHCm2LRGOLv1yWLRrOS\n"
+"LHaxJ2tK/0sXxIoxUQqLcwrobnA4l2drdPB+EeBpYBlYhhsp/F3IRQ3ylOpIPBgd\n"
+"AOaroBlSDin5rLfa7T0YvzcAcNvodVjszIGrSeECx1l4VdiL+M73MvvW4GyfIE2S\n"
+"P7wyuvA665ZFyqsV1ZerHCKyhX3G0xCj+V6wMjAWyHlh\n"
+"-----END ENCRYPTED PRIVATE KEY-----";
+#endif
 
-static const char* device_cert =
+WOLFMQTT_EXAMPLE_CERT const char* device_cert =
 "-----BEGIN CERTIFICATE-----\n"
 "MIIDWjCCAkKgAwIBAgIVANIzUucLFUREa2BiJUXoRv6Z4XaIMA0GCSqGSIb3DQEB\n"
 "CwUAME0xSzBJBgNVBAsMQkFtYXpvbiBXZWIgU2VydmljZXMgTz1BbWF6b24uY29t\n"
@@ -217,6 +245,12 @@ static int mqtt_aws_tls_cb(MqttClient* client)
                 (const byte*)device_cert, (long)XSTRLEN(device_cert),
                 WOLFSSL_FILETYPE_PEM);
 
+        #ifdef WOLFSSL_ENCRYPTED_KEYS
+            /* Setup password callback for pkcs8 key */
+            wolfSSL_CTX_set_default_passwd_cb(client->tls.ctx,
+                    mqtt_password_cb);
+        #endif
+
         /* Load Private Key */
         if (rc == WOLFSSL_SUCCESS)
             rc = wolfSSL_CTX_use_PrivateKey_buffer(client->tls.ctx,
@@ -264,11 +298,117 @@ static int mqtt_message_cb(MqttClient *client, MqttMessage *msg,
 
     if (msg_done) {
         PRINTF("MQTT Message: Done");
+        if (mqttCtx->test_mode) {
+            mTestDone = 1;
+        }
     }
 
     /* Return negative to terminate publish processing */
     return MQTT_CODE_SUCCESS;
 }
+
+#ifdef WOLFMQTT_PROPERTY_CB
+/* The property callback is called after decoding a packet that contains at
+   least one property. The property list is deallocated after returning from
+   the callback. */
+static int mqtt_property_cb(MqttClient *client, MqttProp *head, void *ctx)
+{
+    MqttProp *prop = head;
+    int rc = 0;
+    MQTTCtx* mqttCtx;
+
+    if ((client == NULL) || (client->ctx == NULL)) {
+        return MQTT_CODE_ERROR_BAD_ARG;
+    }
+    mqttCtx = (MQTTCtx*)client->ctx;
+
+    while (prop != NULL) {
+        PRINTF("Property CB: Type %d", prop->type);
+        switch (prop->type) {
+            case MQTT_PROP_SUBSCRIPTION_ID_AVAIL:
+                mqttCtx->subId_not_avail =
+                        prop->data_byte == 0;
+                break;
+
+            case MQTT_PROP_TOPIC_ALIAS_MAX:
+                mqttCtx->topic_alias_max =
+                 (mqttCtx->topic_alias_max < prop->data_short) ?
+                 mqttCtx->topic_alias_max : prop->data_short;
+                break;
+
+            case MQTT_PROP_MAX_PACKET_SZ:
+                if ((prop->data_int > 0) &&
+                    (prop->data_int <= MQTT_PACKET_SZ_MAX))
+                {
+                    client->packet_sz_max =
+                        (client->packet_sz_max < prop->data_int) ?
+                         client->packet_sz_max : prop->data_int;
+                }
+                else {
+                    /* Protocol error */
+                    rc = MQTT_CODE_ERROR_PROPERTY;
+                }
+                break;
+
+            case MQTT_PROP_SERVER_KEEP_ALIVE:
+                mqttCtx->keep_alive_sec = prop->data_short;
+                break;
+
+            case MQTT_PROP_MAX_QOS:
+                client->max_qos = prop->data_byte;
+                break;
+
+            case MQTT_PROP_RETAIN_AVAIL:
+                client->retain_avail = prop->data_byte;
+                break;
+
+            case MQTT_PROP_REASON_STR:
+                PRINTF("Reason String: %.*s",
+                        prop->data_str.len, prop->data_str.str);
+                break;
+
+            case MQTT_PROP_USER_PROP:
+                PRINTF("User property: key=\"%.*s\", value=\"%.*s\"",
+                        prop->data_str.len, prop->data_str.str,
+                        prop->data_str2.len, prop->data_str2.str);
+                break;
+
+            case MQTT_PROP_ASSIGNED_CLIENT_ID:
+            case MQTT_PROP_PAYLOAD_FORMAT_IND:
+            case MQTT_PROP_MSG_EXPIRY_INTERVAL:
+            case MQTT_PROP_CONTENT_TYPE:
+            case MQTT_PROP_RESP_TOPIC:
+            case MQTT_PROP_CORRELATION_DATA:
+            case MQTT_PROP_SUBSCRIPTION_ID:
+            case MQTT_PROP_SESSION_EXPIRY_INTERVAL:
+            case MQTT_PROP_TOPIC_ALIAS:
+            case MQTT_PROP_TYPE_MAX:
+            case MQTT_PROP_RECEIVE_MAX:
+            case MQTT_PROP_WILDCARD_SUB_AVAIL:
+            case MQTT_PROP_SHARED_SUBSCRIPTION_AVAIL:
+            case MQTT_PROP_RESP_INFO:
+            case MQTT_PROP_SERVER_REF:
+            case MQTT_PROP_AUTH_METHOD:
+            case MQTT_PROP_AUTH_DATA:
+            case MQTT_PROP_NONE:
+                break;
+            case MQTT_PROP_REQ_PROB_INFO:
+            case MQTT_PROP_WILL_DELAY_INTERVAL:
+            case MQTT_PROP_REQ_RESP_INFO:
+            default:
+                /* Invalid */
+                rc = MQTT_CODE_ERROR_PROPERTY;
+                break;
+        }
+        prop = prop->next;
+    }
+
+    (void)ctx;
+
+    return rc;
+}
+#endif /* WOLFMQTT_PROPERTY_CB */
+
 
 int awsiot_test(MQTTCtx *mqttCtx)
 {
@@ -325,12 +465,13 @@ int awsiot_test(MQTTCtx *mqttCtx)
                 goto exit;
             }
             mqttCtx->client.ctx = mqttCtx;
-
-        #ifdef WOLFMQTT_V5
-            /* AWS broker only supports v3.1.1 client */
-            mqttCtx->client.protocol_level = MQTT_CONNECT_PROTOCOL_LEVEL_4;
-        #endif
-
+#ifdef WOLFMQTT_PROPERTY_CB
+            rc = MqttClient_SetPropertyCallback(&mqttCtx->client,
+                    mqtt_property_cb, NULL);
+            if (rc != MQTT_CODE_SUCCESS) {
+                goto exit;
+            }
+#endif
         }
         FALL_THROUGH;
 
@@ -372,6 +513,20 @@ int awsiot_test(MQTTCtx *mqttCtx)
             /* Optional authentication */
             mqttCtx->connect.username = mqttCtx->username;
             mqttCtx->connect.password = mqttCtx->password;
+#ifdef WOLFMQTT_V5
+            {
+                /* Request Response Information */
+                MqttProp* prop = MqttClient_PropsAdd(&mqttCtx->connect.props);
+                prop->type = MQTT_PROP_REQ_RESP_INFO;
+                prop->data_byte = 1;
+            }
+            {
+                /* Request Problem Information */
+                MqttProp* prop = MqttClient_PropsAdd(&mqttCtx->connect.props);
+                prop->type = MQTT_PROP_REQ_PROB_INFO;
+                prop->data_byte = 1;
+            }
+#endif
         }
         FALL_THROUGH;
 
@@ -384,6 +539,12 @@ int awsiot_test(MQTTCtx *mqttCtx)
             if (rc == MQTT_CODE_CONTINUE) {
                 return rc;
             }
+#ifdef WOLFMQTT_V5
+            if (mqttCtx->connect.props != NULL) {
+                /* Release the allocated properties */
+                MqttClient_PropsFree(mqttCtx->connect.props);
+            }
+#endif
             PRINTF("MQTT Connect: Proto (%s), %s (%d)",
                 MqttClient_GetProtocolVersionString(&mqttCtx->client),
                 MqttClient_ReturnCodeToString(rc), rc);
@@ -457,8 +618,9 @@ int awsiot_test(MQTTCtx *mqttCtx)
             if (rc == MQTT_CODE_CONTINUE) {
                 return rc;
             }
-            PRINTF("MQTT Publish: Topic %s, %s (%d)",
-                mqttCtx->publish.topic_name, MqttClient_ReturnCodeToString(rc), rc);
+            PRINTF("MQTT Publish: Topic %s, ID %d, %s (%d)",
+                mqttCtx->publish.topic_name, mqttCtx->publish.packet_id,
+                MqttClient_ReturnCodeToString(rc), rc);
             if (rc != MQTT_CODE_SUCCESS) {
                 goto disconn;
             }
@@ -473,13 +635,6 @@ int awsiot_test(MQTTCtx *mqttCtx)
             mqttCtx->stat = WMQ_WAIT_MSG;
 
             do {
-                /* check for test mode or stop */
-                if (mStopRead || mqttCtx->test_mode) {
-                    rc = MQTT_CODE_SUCCESS;
-                    PRINTF("MQTT Exiting...");
-                    break;
-                }
-
                 /* Try and read packet */
                 rc = MqttClient_WaitMessage(&mqttCtx->client, mqttCtx->cmd_timeout_ms);
 
@@ -493,8 +648,17 @@ int awsiot_test(MQTTCtx *mqttCtx)
                 if (rc == MQTT_CODE_CONTINUE) {
                     return rc;
                 }
+
+                /* check for test mode or stop */
+                if (mStopRead || mTestDone) {
+                    rc = MQTT_CODE_SUCCESS;
+                    mqttCtx->stat = WMQ_DISCONNECT;
+                    PRINTF("MQTT Exiting...");
+                    break;
+                }
+
             #ifdef WOLFMQTT_ENABLE_STDIN_CAP
-                else if (rc == MQTT_CODE_STDIN_WAKE) {
+                if (rc == MQTT_CODE_STDIN_WAKE) {
                     /* Get data from STDIO */
                     XMEMSET(mqttCtx->rx_buf, 0, MAX_BUFFER_SIZE);
                     if (XFGETS((char*)mqttCtx->rx_buf, MAX_BUFFER_SIZE - 1, stdin) != NULL) {
@@ -514,13 +678,14 @@ int awsiot_test(MQTTCtx *mqttCtx)
                         mqttCtx->publish.buffer = (byte*)mqttCtx->app_ctx;
                         mqttCtx->publish.total_len = (word32)XSTRLEN((char*)mqttCtx->app_ctx);
                         rc = MqttClient_Publish(&mqttCtx->client, &mqttCtx->publish);
-                        PRINTF("MQTT Publish: Topic %s, %s (%d)",
-                            mqttCtx->publish.topic_name,
+                        PRINTF("MQTT Publish: Topic %s, ID %d, %s (%d)",
+                            mqttCtx->publish.topic_name, mqttCtx->publish.packet_id,
                             MqttClient_ReturnCodeToString(rc), rc);
                     }
                 }
+                else
             #endif
-                else if (rc == MQTT_CODE_ERROR_TIMEOUT) {
+                if (rc == MQTT_CODE_ERROR_TIMEOUT) {
                     /* Keep Alive */
                     PRINTF("Keep-alive timeout, sending ping");
 
@@ -615,7 +780,6 @@ exit:
 
 
 /* so overall tests can pull in test function */
-#ifndef NO_MAIN_DRIVER
     #ifdef USE_WINDOWS_API
         #include <windows.h> /* for ctrl handler */
 
@@ -643,7 +807,11 @@ exit:
         }
     #endif
 
+#ifdef NO_MAIN_DRIVER
+    int awsiot_main(int argc, char** argv)
+#else
     int main(int argc, char** argv)
+#endif /* NO_MAIN_DRIVER */
     {
         int rc;
     #ifdef ENABLE_AWSIOT_EXAMPLE
@@ -682,7 +850,7 @@ exit:
     #ifdef ENABLE_AWSIOT_EXAMPLE
         do {
             rc = awsiot_test(&mqttCtx);
-        } while (rc == MQTT_CODE_CONTINUE);
+        } while (!mStopRead && rc == MQTT_CODE_CONTINUE);
 
         mqtt_free_ctx(&mqttCtx);
     #else
@@ -696,5 +864,3 @@ exit:
 
         return (rc == 0) ? 0 : EXIT_FAILURE;
     }
-
-#endif /* NO_MAIN_DRIVER */

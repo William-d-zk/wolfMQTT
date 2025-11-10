@@ -2,6 +2,7 @@
 
 This is an implementation of the MQTT Client written in C for embedded use, which supports SSL/TLS via the wolfSSL library. This library was built from the ground up to be multi-platform, space conscious and extensible. Integrates with wolfSSL to provide TLS support.
 
+For details on wolfMQTT [see the wolfMQTT Manual](https://www.wolfssl.com/documentation/manuals/wolfmqtt/wolfMQTT-Manual.pdf).
 
 ## Building
 
@@ -53,6 +54,23 @@ cmake .. -DWITH_WOLFSSL_TREE=/path/to/wolfssl/
 cmake --build .
 ```
 
+### vcpkg
+
+ You can download and install wolfMQTT using the [vcpkg](https://github.com/Microsoft/vcpkg):
+
+    git clone https://github.com/Microsoft/vcpkg.git
+    cd vcpkg
+    ./bootstrap-vcpkg.sh
+    OR for Windows
+    bootstrap-vcpkg.bat
+
+    ./vcpkg integrate install
+    ./vcpkg install wolfmqtt
+
+The wolfMQTT port in vcpkg is kept up to date by wolfSSL.
+
+We also have vcpkg ports for wolftpm, wolfssl and curl.
+
 ### Arduino
 
 See `README.md` at [IDE/ARDUINO.README.md](IDE/ARDUINO.README.md)
@@ -74,6 +92,10 @@ cd ../wolfmqtt
 ./configure --host=i686 CC=i686-w64-mingw32-gcc LD=i686-w64-mingw32-ld CFLAGS="-DWIN32 -DMINGW -D_WIN32_WINNT=0x0600 -DBUILDING_WOLFMQTT -I$PREFIX/include" LDFLAGS="-lws2_32 -L$PREFIX/lib -lwolfssl" --prefix=$PREFIX --disable-examples
 make
 ```
+
+### Zephyr RTOS
+
+Support for Zephyr is available in the [zephyr](zephyr) directory. For instructions on how to build for Zephyr, see the [README.md](zephyr/README.md).
 
 ## Architecture
 
@@ -142,7 +164,7 @@ Here are the steps for creating your own implementation.
 ## Examples
 
 ### Client Example
-The example MQTT client is located in `/examples/mqttclient/`. This example exercises many of the exposed API’s and prints any incoming publish messages for subscription topic “wolfMQTT/example/testTopic”. This client contains examples of many MQTTv5 features, including the property callback and server assignment of client ID. The mqqtclient example is a good starting template for your MQTT application.
+The example MQTT client is located in `/examples/mqttclient/`. This example exercises many of the exposed API's and prints any incoming publish messages for subscription topic "wolfMQTT/example/testTopic". This client contains examples of many MQTTv5 features, including the property callback and server assignment of client ID. The mqqtclient example is a good starting template for your MQTT application.
 
 ### Simple Standalone Client Example
 The example MQTT client is located in `/examples/mqttsimple/`. This example demonstrates a standalone client using standard BSD sockets. This requires `HAVE_SOCKET` to be defined, which comes from the ./configure generated `wolfmqtt/config.h` file. All parameters are build-time macros defined at the top of `/examples/mqttsimple/mqttsimple.c`.
@@ -151,7 +173,7 @@ The example MQTT client is located in `/examples/mqttsimple/`. This example demo
 The example MQTT client is located in `/examples/nbclient/`. This example uses non-blocking I/O for message exchange. The wolfMQTT library must be configured with the `--enable-nonblock` option (or built with `WOLFMQTT_NONBLOCK`).
 
 ### Firmware Example
-The MQTT firmware update is located in `/examples/firmware/`. This example has two parts. The first is called “fwpush”, which signs and publishes a firmware image. The second is called “fwclient”, which receives the firmware image and verifies the signature. This example publishes message on the topic “wolfMQTT/example/firmware”. The "fwpush" application is an example of using a publish callback to send the payload data.
+The MQTT firmware update is located in `/examples/firmware/`. This example has two parts. The first is called "fwpush", which signs and publishes a firmware image. The second is called "fwclient", which receives the firmware image and verifies the signature. This example publishes message on the topic "wolfMQTT/example/firmware". The "fwpush" application is an example of using a publish callback to send the payload data.
 
 ### Azure IoT Hub Example
 We setup a wolfMQTT IoT Hub on the Azure server for testing. We added a device called `demoDevice`, which you can connect and publish to. The example demonstrates creation of a SasToken, which is used as the password for the MQTT connect packet. It also shows the topic names for publishing events and listening to `devicebound` messages. This example only works with `ENABLE_MQTT_TLS` set and the wolfSSL library present because it requires Base64 Encode/Decode and HMAC-SHA256. Note: The wolfSSL library must be built with `./configure --enable-base64encode` or `#define WOLFSSL_BASE64_ENCODE`. The `wc_GetTime` API was added in 3.9.1 and if not present you'll need to implement your own version of this to get current UTC seconds or update your wolfSSL library.
@@ -163,34 +185,26 @@ We setup an AWS IoT endpoint and testing device certificate for testing. The AWS
 
 ### Watson IoT Example
 This example enables the wolfMQTT client to connect to the IBM Watson Internet of Things (WIOT) Platform. The WIOT Platform has a limited test broker called "Quickstart" that allows non-secure connections to exercise the component. The example is located in `/examples/wiot/`. Works with MQTT v5 support enabled.
-**NOTE** The WIOT QuickStart broker is no longer available. The demo may still be useful for users of IBM Watson IOT.
+**NOTE** The WIOT Platform will be disabled DEC2023. The demo may still be useful for users of IBM Watson IOT. 
 
 ### MQTT-SN Example
 The Sensor Network client implements the MQTT-SN protocol for low-bandwidth networks. There are several differences from MQTT, including the ability to use a two byte Topic ID instead the full topic during subscribe and publish. The SN client requires an MQTT-SN gateway. The gateway acts as an intermediary between the SN clients and the broker. This client was tested with the Eclipse Paho MQTT-SN Gateway, which connects by default to the public Eclipse broker, much like our wolfMQTT Client example. The address of the gateway must be configured as the host. The example is located in `/examples/sn-client/`.
 
-A special feature of MQTT-SN is the ability to use QoS level -1 (negative one) to publish to a predefined topic without first connecting to the gateway. There is no feedback in the application if there was an error, so confirmation of the test would involve running the `sn-client` first and watching for the publish from the `sn-client_qos-1`. There is an example provided in `/examples/sn-client/sn-client_qos-1`. It requires some configuration changes of the gateway.
-
-* Enable the the QoS-1 feature, predefined topics, and change the gateway name in `gateway.conf`:
-
-```
-QoS-1=YES
-PredefinedTopic=YES
-PredefinedTopicList=./predefinedTopic.conf
-.
-.
-.
-#GatewayName=PahoGateway-01
-GatewayName=WolfGateway
-```
-
-* Comment out all entries and add a new topic in `predefinedTopic.conf`:
-
-```
-WolfGatewayQoS-1,wolfMQTT/example/testTopic, 1
-```
+More about MQTT-SN examples in [examples/sn-client/README.md](examples/sn-client/README.md)
 
 ### Multithread Example
-This example exercises the multithreading capabilities of the client library. The client implements two tasks: one that publishes to the broker; and another that waits for messages from the broker. The publish thread is created `NUM_PUB_TASKS` times (10 by default) and sends unique messages to the broker. This feature is enabled using the `--enable-mt` configuration option. The example is located in `/examples/multithread/`.
+This example exercises the multithreading capabilities of the client library. The client implements two tasks: one that publishes to the broker; and another that waits for messages from the broker. The publish thread is created `NUM_PUB_TASKS` times (5 by default) and sends unique messages to the broker. This feature is enabled using the `--enable-mt` configuration option. The example is located in `/examples/multithread/`.
+
+The multi-threading feature can also be used with the non-blocking socket (--enable-nonblock).
+
+If you are having issues with thread synchronization on Linux consider using not the conditional signal (`WOLFMQTT_NO_COND_SIGNAL`).
+
+### Atomic publish and subscribe examples
+In the `examples/pub-sub` folder, there are two simple client examples:
+* mqtt-pub - publishes to a topic
+* mqtt-sub - subscribes to a topic and waits for messages
+
+These examples are useful for quickly testing or scripting.
 
 ## Example Options
 The command line examples can be executed with optional parameters. To see a list of the available parameters, add the `-?`
@@ -248,7 +262,8 @@ The initially supported version with full specification support for all features
 
 ### MQTT v5.0 Specification Support
 
-The wolfMQTT client supports connecting to v5 enabled brokers when configured with the `--enable-mqtt5` option. Handling properties received from the server is accomplished via a callback when the `--enable-propcb` option is set. The following v5.0 specification features are supported by the wolfMQTT client:
+The wolfMQTT client supports connecting to v5 enabled brokers when configured with the `--enable-v5` option. 
+The following v5.0 specification features are supported by the wolfMQTT client:
 * AUTH packet
 * User properties
 * Server connect ACK properties
@@ -278,6 +293,8 @@ The v5 enabled wolfMQTT client was tested with the following MQTT v5 brokers:
 * EMQX broker
 ** `./examples/mqttclient/mqttclient -h "broker.emqx.io"`
 
+Properties are allocated from a local stack (size `MQTT_MAX_PROPS`) by default. Define `WOLFMQTT_DYN_PROP` to use malloc for property allocation.
+
 ### MQTT Sensor Network (MQTT-SN) Specification Support
 
 The wolfMQTT SN Client implementation is based on the OASIS MQTT-SN v1.2 specification. The SN API is configured with the `--enable-sn` option. There is a separate API for the sensor network API, which all begin with the "SN_" prefix. The wolfMQTT SN Client operates over UDP, which is distinct from the wolfMQTT clients that use TCP. The following features are supported by the wolfMQTT SN Client:
@@ -295,27 +312,38 @@ The SN client was tested using the Eclipse Paho MQTT-SN Gateway (https://github.
 
 ## Post-Quantum MQTT Support
 
-Recently the OpenQuantumSafe project has integrated their fork of OpenSSL with the mosquito MQTT broker. You can now build wolfMQTT with wolfSSL and liboqs and use that to publish to the mosquito MQTT broker. Currently, wolfMQTT supports the `KYBER_LEVEL1` and `P256_KYBER_LEVEL1` groups and FALCON_LEVEL1 for authentication in TLS 1.3. This works on Linux.
+Recently the OpenQuantumSafe project has integrated their fork of OpenSSL with the mosquito MQTT broker. You can now build wolfMQTT with wolfSSL and use that to publish to the mosquito MQTT broker. Currently, wolfMQTT supports the `ML_KEM_768` and `SecP384r1MLKEM768` groups and ML-DSA-65 for authentication in TLS 1.3. This works on Linux.
 
 ### Getting Started with Post-Quantum Mosquito MQTT Broker and Subscriber
 
-To get started, you can use the code from the following github pull request:
+To get started, you can use the oqs-demos repo at https://github.com/open-quantum-safe/oqs-demos/ .
 
-https://github.com/open-quantum-safe/oqs-demos/pull/143
+Follow all the instructions in README.md and USAGE.md. This allows you to create a docker image and a docker network. Then you will run a broker, a subscriber and a publisher. At the end the publisher will exit and the broker and subscriber will remain active.
 
-Follow all the instructions in README.md and USAGE.md. This allows you to create a docker image and a docker network. Then you will run a broker, a subscriber and a publisher. At the end the publisher will exit and the broker and subscriber will remain active. You will need to re-activate the publisher docker instance and get the following files onto your local machine:
+NOTE: Do not stop the broker and the subscriber instances.
+
+You will need to get into a docker instance and get the following files onto your local machine:
 
 - /test/cert/CA.crt
 - /test/cert/publisher.crt
 - /test/cert/publisher.key
 
-NOTE: Do not stop the broker and the subscriber instances.
+Once the publisher exits, the following command can be executed:
+
+sudo docker run --network mosquitto-test --ip 174.18.0.4 -it --rm --name oqs-mosquitto-publisher -e "BROKER_IP=174.18.0.2" -e "PUB_IP=174.18.0.4" oqs-mosquitto bash
+
+This opens a bash shell "inside" the docker container. You'll see the shell script for executing the publisher. This includes commands for generating the keys and certificates. Execute them and then use cat to display them and then copy and paste them into the wolfMQTT root directory.
 
 ### Building and Running Post-Quantum wolfMQTT Publisher
 
-Follow the instructions for obtaining and building liboqs and building wolfSSL in section 15 of the following document:
+Build and install wolfSSL like this:
 
-https://github.com/wolfSSL/wolfssl/blob/master/INSTALL
+```
+./autogen.sh (if obtained from github)
+./configure --enable-dilithium --enable-mlkem
+make all
+make check
+```
 
 No special flags are required for building wolfMQTT. Simply do the following:
 
@@ -326,11 +354,205 @@ make all
 make check
 ```
 
+NOTE: No need to install wolfmqtt.
+
 Since the broker and subscriber are still running, you can use `mqttclient` to publish using post-quantum algorithms in TLS 1.3 by doing the following:
 
 ```
-./examples/mqttclient/mqttclient -h 172.18.0.2 -t -A CA.crt -K publisher.key -c publisher.crt -m "Hello from post-quantum wolfMQTT!!" -n test/sensor1 -Q KYBER_LEVEL1
+./examples/mqttclient/mqttclient -T -h 174.18.0.2 -p 8883 -t -A CA.crt -K publisher.key -c publisher.crt -m "Hello from post-quantum wolfMQTT" -n test/sensor1 -Q SecP384r1MLKEM768
 ```
 
-Congratulations! You have just published an MQTT message using TLS 1.3 with the `KYBER_LEVEL1` KEM and `FALCON_LEVEL1` signature scheme. To use the hybrid group, replace `KYBER_LEVEL1` with `P256_KYBER_LEVEL1`.
+Congratulations! You have just published an MQTT message using TLS 1.3 with ML-KEM-768 hybridized with ECDHE on the P-384 curve and ML-DSA-65 signature scheme. To use only ML-KEM-768, replace `SecP384r1MLKEM768` with `ML_KEM_768`. Moreover, you have also shown interoperability with liboqs, liboqs-provider, openssl3 and mosquitto.
 
+Latest version combination tested:
+    - wolfSSL: v5.8.2-stable
+    - wolfMQTT: v1.20.0
+    - oqs-demos: commit 29d4dccbd547a62e8ba77d3fef1af5d6f8625d60
+
+## Curl Easy Socket Support
+
+wolfMQTT now supports using libcurl's easy socket interface as a backend.
+When enabled, wolfMQTT will use the libcurl API for the socket backend,
+and libcurl will use wolfSSL to negotiate TLS.
+This can be enabled with `--enable-curl`.
+
+At this time wolfMQTT's libcurl option supports both TLS and mTLS, but not Post-Quantum TLS.
+
+### How to use libcurl with wolfMQTT
+
+To use wolfMQTT with libcurl and wolfSSL:
+- build wolfssl with `--enable-curl` and install to `/usr/local`.
+- build libcurl with `--with-wolfssl` and install to `/usr/local`.
+
+Finally, build wolfMQTT with `--enable-curl`.
+
+### Supported Build Options
+
+The `--enable-curl` option works with these combinations:
+- `--enable-mt`
+- `--enable-nonblock`
+- `--enable-tls` (default enabled)
+- `--enable-timeout` (default enabled)
+
+However `--enable-curl` is incompatible and not supported with these options:
+- `--enable-all`
+- `--enable-sn`
+
+## Stress Build Option
+
+To simplify testing a stress build option has been added, `--enable-stress=[args]`.
+The Stress option enables multithreading and nonblocking, and adds defines for
+`TEST_NONBLOCK`, `NUM_PUB_TASKS`, and `NUM_PUB_PER_TASK`.
+
+Examples of usage:
+- `--enable-stress`: stress with default options.
+- `--enable-stress=t7,p8`: stress with 7 threads, and 8 publishes per thread.
+- `--enable-stress=t7,p8 --enable-curl`: same as above, but with curl backend.
+
+Note: When stress is enabled, the Multithread Example becomes localhost only
+and will not connect to remote servers. Additionally the test `scripts/stress.test`
+is added to `make check`, and all other tests are disabled.
+
+## WebSocket Support
+
+wolfMQTT supports MQTT over WebSockets, allowing clients to connect to MQTT brokers through WebSocket endpoints. This is useful for environments where traditional MQTT ports might be blocked or when integrating with web applications.
+
+Both standard WebSockets and secure WebSockets (WSS) are supported.
+
+### Building with WebSocket Support
+
+To build wolfMQTT with WebSocket support:
+
+1. Install the libwebsockets development library:
+
+```
+# On Debian/Ubuntu
+sudo apt-get install libwebsockets-dev
+
+# On macOS with Homebrew
+brew install libwebsockets
+```
+
+2. Configure wolfMQTT with WebSocket support:
+
+```
+./configure --enable-websocket
+```
+   Note: You can also build wolfSSL with `--enable-opensslcoexist` (to support both OpenSSL and wolfSSL in the same build) if you encounter any conflicts.
+
+3. Build as usual:
+
+```
+make
+```
+
+### WebSocket Example
+
+The WebSocket client example is located in `/examples/websocket/`. This example demonstrates how to connect to an MQTT broker using WebSockets. The example subscribes to the topic "test/topic" and waits for incoming messages.
+
+To run the example:
+
+```
+./examples/websocket/websocket_client [-h host] [-p port] [-t]
+```
+
+By default, it connects to `localhost` on port `8080`.
+
+#### Secure WebSocket Support
+
+wolfMQTT also supports secure WebSockets (WSS), which use TLS to encrypt the WebSocket connection.
+
+To use secure WebSockets:
+
+* Make sure you have built wolfMQTT with both WebSocket and TLS support:
+
+```
+./configure --enable-websocket --enable-tls
+```
+* Run the WebSocket example with TLS enabled:
+
+```
+./examples/websocket/websocket_client -t -p 8081
+```
+* You can also specify a CA certificate for TLS verification:
+
+```
+./examples/websocket/websocket_client -t -p 8081 -A /path/to/ca-cert.pem
+```
+* For mutual TLS authentication, you can specify client certificate and key:
+
+```
+./examples/websocket/websocket_client -t -p 8081 -A /path/to/ca-cert.pem --cert /path/to/client-cert.pem --key /path/to/client-key.pem
+```
+
+* You can also build the libwebsockets library from source with support for TLS from wolfSSL:
+
+```
+cmake .. -DLWS_WITH_WOLFSSL=1 -DLWS_WOLFSSL_INCLUDE_DIRS=/usr/local/include/wolfssl -DLWS_WOLFSSL_LIBRARIES=/usr/local/lib/libwolfssl.so -DLWS_WITH_EXTERNAL_POLL=1 -DCMAKE_BUILD_TYPE=DEBUG ..
+```
+
+   This option requires wolfSSL to be built with `./configure --enable-libwebsockets --enable-alpn` and installed to `/usr/local`.
+
+### Broker Configuration
+
+To use the WebSocket example, your MQTT broker must be configured to support WebSockets. For Mosquitto, add the following to your `mosquitto.conf`:
+
+```
+# WebSocket settings
+listener 8080
+protocol websockets
+```
+
+For Secure WebSocket Support, add:
+
+```
+# Secure WebSocket
+listener 8081
+protocol websockets
+cafile <path-to>/ca-cert.pem
+# Path to the PEM encoded server certificate.
+certfile <path-to>/server-cert.pem
+# Path to the PEM encoded keyfile.
+keyfile <path-to>/server-key.pem
+```
+
+Then restart Mosquitto with this configuration:
+
+```
+mosquitto -c mosquitto.conf
+```
+
+There is an example mosquitto configuration file in the websocket folder:
+`<wolfMQTT>$ mosquitto -c examples/websocket/mosq_ws.conf`
+
+You can also build the mosquitto broker to use wolfSSL for the TLS connection:
+https://github.com/wolfSSL/osp/tree/master/mosquitto
+
+### Implementation Details
+
+The WebSocket implementation uses libwebsockets as the backend and provides custom network callbacks for the MQTT client:
+
+- `NetWebsocket_Connect`: Establishes a WebSocket connection to the broker
+- `NetWebsocket_Read`: Reads data from the WebSocket connection
+- `NetWebsocket_Write`: Writes data to the WebSocket connection
+- `NetWebsocket_Disconnect`: Closes the WebSocket connection
+
+The example also implements a ping mechanism to keep the WebSocket connection alive, sending a ping to the broker every 30 seconds.
+
+### Testing with public brokers
+You can test the wolfMQTT client against public brokers supporting websockets:
+* Mosquitto unencrypted
+
+    `./examples/websocket/websocket_client -h test.mosquitto.org -p8080`
+ 
+* Mosquitto secure websocket
+
+    `./examples/websocket/websocket_client -h test.mosquitto.org -p8081 -t`
+ 
+* HiveMQ unencrypted
+
+    `./examples/websocket/websocket_client -h broker.hivemq.com -p8000`
+
+* HiveMQ secure websockets
+
+    `./examples/websocket/websocket_client -h broker.hivemq.com -p8884 -t`

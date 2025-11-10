@@ -1,6 +1,6 @@
 /* nbclient.c
  *
- * Copyright (C) 2006-2022 wolfSSL Inc.
+ * Copyright (C) 2006-2025 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -26,18 +26,21 @@
 
 
 #include "wolfmqtt/mqtt_client.h"
+#include "nbclient.h"
 
 #ifdef WOLFMQTT_NONBLOCK
-#include "nbclient.h"
 #include "examples/mqttnet.h"
 
 /* Locals */
 static int mStopRead = 0;
+static int mTestDone = 0;
 
 /* Configuration */
 
 /* Maximum size for network read/write callbacks. */
+#ifndef MAX_BUFFER_SIZE
 #define MAX_BUFFER_SIZE 1024
+#endif
 
 #ifdef WOLFMQTT_PROPERTY_CB
 #define MAX_CLIENT_ID_LEN 64
@@ -84,7 +87,7 @@ static int mqtt_message_cb(MqttClient *client, MqttMessage *msg,
                 XSTRNCMP(DEFAULT_MESSAGE, (char*)msg->buffer,
                          msg->buffer_len) == 0)
             {
-                mStopRead = 1;
+                mTestDone = 1;
             }
         }
     }
@@ -443,10 +446,12 @@ int mqttclient_test(MQTTCtx *mqttCtx)
 
                 if ((mqttCtx->pub_file) && (mqttCtx->publish.buffer)) {
                     WOLFMQTT_FREE(mqttCtx->publish.buffer);
+                    mqttCtx->publish.buffer = NULL;
+                    mqttCtx->pub_file = NULL; /* don't try and send file again */
                 }
 
-                PRINTF("MQTT Publish: Topic %s, %s (%d)",
-                    mqttCtx->publish.topic_name,
+                PRINTF("MQTT Publish: Topic %s, ID %d, %s (%d)",
+                    mqttCtx->publish.topic_name, mqttCtx->publish.packet_id,
                     MqttClient_ReturnCodeToString(rc), rc);
                 if (rc != MQTT_CODE_SUCCESS) {
                     goto disconn;
@@ -467,13 +472,6 @@ int mqttclient_test(MQTTCtx *mqttCtx)
                 rc = MqttClient_WaitMessage(&mqttCtx->client,
                                             mqttCtx->cmd_timeout_ms);
 
-                /* check for test mode */
-                if (mStopRead) {
-                    rc = MQTT_CODE_SUCCESS;
-                    PRINTF("MQTT Exiting...");
-                    break;
-                }
-
                 /* Track elapsed time with no activity and trigger timeout */
                 rc = mqtt_check_timeout(rc, &mqttCtx->start_sec,
                     mqttCtx->cmd_timeout_ms/1000);
@@ -482,8 +480,17 @@ int mqttclient_test(MQTTCtx *mqttCtx)
                 if (rc == MQTT_CODE_CONTINUE) {
                     return rc;
                 }
+
+                /* check for test mode */
+                if (mStopRead || mTestDone) {
+                    rc = MQTT_CODE_SUCCESS;
+                    mqttCtx->stat = WMQ_DISCONNECT;
+                    PRINTF("MQTT Exiting...");
+                    break;
+                }
+
             #ifdef WOLFMQTT_ENABLE_STDIN_CAP
-                else if (rc == MQTT_CODE_STDIN_WAKE) {
+                if (rc == MQTT_CODE_STDIN_WAKE) {
                     XMEMSET(mqttCtx->rx_buf, 0, MAX_BUFFER_SIZE);
                     if (XFGETS((char*)mqttCtx->rx_buf, MAX_BUFFER_SIZE - 1,
                             stdin) != NULL)
@@ -504,8 +511,9 @@ int mqttclient_test(MQTTCtx *mqttCtx)
                         return rc;
                     }
                 }
+                else
             #endif
-                else if (rc == MQTT_CODE_ERROR_TIMEOUT) {
+                if (rc == MQTT_CODE_ERROR_TIMEOUT) {
                     /* Need to send keep-alive ping */
                     PRINTF("Keep-alive timeout, sending ping");
                     rc = MQTT_CODE_CONTINUE;
@@ -643,7 +651,6 @@ exit:
 
 
 /* so overall tests can pull in test function */
-#if !defined(NO_MAIN_DRIVER) && !defined(MICROCHIP_MPLAB_HARMONY)
     #ifdef USE_WINDOWS_API
         #include <windows.h> /* for ctrl handler */
 
@@ -671,7 +678,11 @@ exit:
         }
     #endif
 
+#if defined(NO_MAIN_DRIVER)
+    int mqttclient_main(int argc, char** argv)
+#else
     int main(int argc, char** argv)
+#endif
     {
         int rc;
 #ifdef WOLFMQTT_NONBLOCK
@@ -712,7 +723,7 @@ exit:
         #ifdef WOLFSSL_ASYNC_CRYPT
             wolfSSL_AsyncPoll(mqttCtx.client.tls.ssl, WOLF_POLL_FLAG_CHECK_HW);
         #endif
-        } while (rc == MQTT_CODE_CONTINUE);
+        } while (!mStopRead && rc == MQTT_CODE_CONTINUE);
 
         mqtt_free_ctx(&mqttCtx);
 #else
@@ -728,4 +739,3 @@ exit:
         return (rc == 0) ? 0 : EXIT_FAILURE;
     }
 
-#endif /* NO_MAIN_DRIVER */

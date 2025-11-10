@@ -1,6 +1,6 @@
 /* mqttclient.c
  *
- * Copyright (C) 2006-2022 wolfSSL Inc.
+ * Copyright (C) 2006-2025 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -24,8 +24,6 @@
     #include <config.h>
 #endif
 
-#include "wolfmqtt/mqtt_client.h"
-
 #include "mqttclient.h"
 #include "examples/mqttnet.h"
 
@@ -36,7 +34,9 @@ static int mStopRead = 0;
 
 /* Maximum size for network read/write callbacks. There is also a v5 define that
    describes the max MQTT control packet size, DEFAULT_MAX_PKT_SZ. */
+#ifndef MAX_BUFFER_SIZE
 #define MAX_BUFFER_SIZE 1024
+#endif
 
 #ifdef WOLFMQTT_PROPERTY_CB
 #define MAX_CLIENT_ID_LEN 64
@@ -499,18 +499,19 @@ int mqttclient_test(MQTTCtx *mqttCtx)
     #endif
 
         /* This loop allows payloads larger than the buffer to be sent by
-           repeatedly calling publish.
-        */
+         * repeatedly calling publish. */
         do {
             rc = MqttClient_Publish(&mqttCtx->client, &mqttCtx->publish);
-        } while(rc == MQTT_CODE_PUB_CONTINUE);
+        } while (rc == MQTT_CODE_PUB_CONTINUE || rc == MQTT_CODE_CONTINUE);
 
         if ((mqttCtx->pub_file) && (mqttCtx->publish.buffer)) {
             WOLFMQTT_FREE(mqttCtx->publish.buffer);
+            mqttCtx->publish.buffer = NULL;
+            mqttCtx->pub_file = NULL; /* don't try and send file again */
         }
 
-        PRINTF("MQTT Publish: Topic %s, %s (%d)",
-            mqttCtx->publish.topic_name,
+        PRINTF("MQTT Publish: Topic %s, ID %d, %s (%d)",
+            mqttCtx->publish.topic_name, mqttCtx->publish.packet_id,
             MqttClient_ReturnCodeToString(rc), rc);
     #ifdef WOLFMQTT_V5
         if (mqttCtx->qos > 0) {
@@ -575,8 +576,8 @@ int mqttclient_test(MQTTCtx *mqttCtx)
                 mqttCtx->publish.total_len = (word16)rc;
                 rc = MqttClient_Publish(&mqttCtx->client,
                        &mqttCtx->publish);
-                PRINTF("MQTT Publish: Topic %s, %s (%d)",
-                    mqttCtx->publish.topic_name,
+                PRINTF("MQTT Publish: Topic %s, ID %d, %s (%d)",
+                    mqttCtx->publish.topic_name, mqttCtx->publish.packet_id,
                     MqttClient_ReturnCodeToString(rc), rc);
             }
         }
@@ -650,9 +651,6 @@ disconn:
 
     PRINTF("MQTT Disconnect: %s (%d)",
         MqttClient_ReturnCodeToString(rc), rc);
-    if (rc != MQTT_CODE_SUCCESS) {
-        goto disconn;
-    }
 
     rc = MqttClient_NetDisconnect(&mqttCtx->client);
 
@@ -675,7 +673,6 @@ exit:
 
 
 /* so overall tests can pull in test function */
-#if !defined(NO_MAIN_DRIVER) && !defined(MICROCHIP_MPLAB_HARMONY)
     #ifdef USE_WINDOWS_API
         #include <windows.h> /* for ctrl handler */
 
@@ -699,15 +696,17 @@ exit:
         }
     #endif
 
+#if defined(NO_MAIN_DRIVER)
+int mqttclient_main(int argc, char** argv)
+#else
 int main(int argc, char** argv)
+#endif
 {
     int rc;
     MQTTCtx mqttCtx;
 
     /* init defaults */
     mqtt_init_ctx(&mqttCtx);
-    mqttCtx.app_name = "mqttclient";
-    mqttCtx.message = DEFAULT_MESSAGE;
 
     /* parse arguments */
     rc = mqtt_parse_args(&mqttCtx, argc, argv);
@@ -738,4 +737,3 @@ int main(int argc, char** argv)
     return (rc == 0) ? 0 : EXIT_FAILURE;
 }
 
-#endif /* NO_MAIN_DRIVER */

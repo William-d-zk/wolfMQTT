@@ -1,6 +1,6 @@
 /* mqttsimple.c
  *
- * Copyright (C) 2006-2022 wolfSSL Inc.
+ * Copyright (C) 2006-2025 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -27,15 +27,17 @@
 #endif
 
 #include "wolfmqtt/mqtt_client.h"
+#include "examples/mqttport.h"
 #include "mqttsimple.h"
 
 /* Requires BSD Style Socket */
-#ifdef HAVE_SOCKET
-
+#if defined(HAVE_SOCKET) && ! defined(HAVE_NETX)
 #ifndef ENABLE_MQTT_TLS
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
+#ifndef WOLFSSL_LWIP
+    #include <netinet/in.h>
+#endif
 #include <netdb.h>
 #include <unistd.h>
 #endif
@@ -134,7 +136,7 @@ static int socket_get_error(int sockFd)
 {
     int so_error = 0;
     socklen_t len = sizeof(so_error);
-    getsockopt(sockFd, SOL_SOCKET, SO_ERROR, &so_error, &len);
+    (void)getsockopt(sockFd, SOL_SOCKET, SO_ERROR, &so_error, &len);
     return so_error;
 }
 
@@ -169,16 +171,15 @@ static int mqtt_net_connect(void *context, const char* host, word16 port,
         /* prefer ip4 addresses */
         while (res) {
             if (res->ai_family == AF_INET) {
-                result = res;
                 break;
             }
             res = res->ai_next;
         }
-        if (result->ai_family == AF_INET) {
+        if (res) {
             addr.sin_port = htons(port);
             addr.sin_family = AF_INET;
             addr.sin_addr =
-                ((struct sockaddr_in*)(result->ai_addr))->sin_addr;
+                ((struct sockaddr_in*)(res->ai_addr))->sin_addr;
         }
         else {
             rc = -1;
@@ -222,12 +223,13 @@ static int mqtt_net_read(void *context, byte* buf, int buf_len, int timeout_ms)
 
     /* Setup timeout */
     setup_timeout(&tv, timeout_ms);
-    setsockopt(*pSockFd, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv, sizeof(tv));
+    (void)setsockopt(*pSockFd, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv,
+            sizeof(tv));
 
     /* Loop until buf_len has been read, error or timeout */
     while (bytes < buf_len) {
         rc = (int)recv(*pSockFd, &buf[bytes], buf_len - bytes, 0);
-        if (rc < 0) {
+        if (rc <= 0) {
             rc = socket_get_error(*pSockFd);
             if (rc == 0)
                 break; /* timeout */
@@ -257,7 +259,8 @@ static int mqtt_net_write(void *context, const byte* buf, int buf_len,
 
     /* Setup timeout */
     setup_timeout(&tv, timeout_ms);
-    setsockopt(*pSockFd, SOL_SOCKET, SO_SNDTIMEO, (char *)&tv, sizeof(tv));
+    (void)setsockopt(*pSockFd, SOL_SOCKET, SO_SNDTIMEO, (char *)&tv,
+            sizeof(tv));
 
     rc = (int)send(*pSockFd, buf, buf_len, 0);
     if (rc < 0) {
@@ -424,8 +427,9 @@ int mqttsimple_test(void)
     if (rc != MQTT_CODE_SUCCESS) {
         goto exit;
     }
-    PRINTF("MQTT Publish: Topic %s, Qos %d, Message %s",
-        mqttObj.publish.topic_name, mqttObj.publish.qos, mqttObj.publish.buffer);
+    PRINTF("MQTT Publish: Topic %s, ID %d, Qos %d, Message %s",
+        mqttObj.publish.topic_name, mqttObj.publish.packet_id,
+        mqttObj.publish.qos, mqttObj.publish.buffer);
 
     /* Wait for messages */
     while (1) {
@@ -458,7 +462,7 @@ int main(int argc, char** argv)
     int rc = -1;
     (void)argc;
     (void)argv;
-    #ifdef HAVE_SOCKET
+    #if defined(HAVE_SOCKET) && ! defined(HAVE_NETX)
     rc = mqttsimple_test();
     #endif
     return (rc == 0) ? 0 : EXIT_FAILURE;

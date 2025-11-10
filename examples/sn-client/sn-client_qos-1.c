@@ -1,6 +1,6 @@
 /* sn-client_qos-1.c
  *
- * Copyright (C) 2006-2022 wolfSSL Inc.
+ * Copyright (C) 2006-2025 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -40,7 +40,9 @@ static int mStopRead = 0;
 
 /* Configuration */
 /* Maximum size for network read/write callbacks. */
+#ifndef MAX_BUFFER_SIZE
 #define MAX_BUFFER_SIZE 1024
+#endif
 #define TEST_MESSAGE    "QoS-1 test message"
 char    SHORT_TOPIC_NAME[] = {1};
 
@@ -109,11 +111,6 @@ int sn_testQoSn1(MQTTCtx *mqttCtx)
         }
     }
 
-    /* Check for error */
-    if (rc != MQTT_CODE_SUCCESS) {
-        goto disconn;
-    }
-
 disconn:
 
     rc = MqttClient_NetDisconnect(&mqttCtx->client);
@@ -138,7 +135,6 @@ exit:
 #endif /* WOLFMQTT_SN */
 
 /* so overall tests can pull in test function */
-#if !defined(NO_MAIN_DRIVER) && !defined(MICROCHIP_MPLAB_HARMONY)
     #ifdef USE_WINDOWS_API
         #include <windows.h> /* for ctrl handler */
 
@@ -162,7 +158,11 @@ exit:
         }
     #endif
 
+#if defined(NO_MAIN_DRIVER)
+int sn_QoSn1_main(int argc, char** argv)
+#else
 int main(int argc, char** argv)
+#endif
 {
     int rc;
 #ifdef WOLFMQTT_SN
@@ -210,4 +210,3 @@ int main(int argc, char** argv)
     return (rc == 0) ? 0 : EXIT_FAILURE;
 }
 
-#endif /* NO_MAIN_DRIVER */

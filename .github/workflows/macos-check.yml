@@ -2,57 +2,87 @@ name: macOS Build Test
 
 on:
   push:
-    branches: [ '*' ]
+    branches: [ 'master', 'main', 'release/**' ]
   pull_request:
     branches: [ '*' ]
+
+env:
+  WOLFMQTT_NO_EXTERNAL_BROKER_TESTS: 1
 
 jobs:
   build:
 
     runs-on: macos-latest
+    timeout-minutes: 10
     steps:
+    - uses: actions/checkout@master
     - uses: actions/checkout@master
       with:
         repository: wolfssl/wolfssl
         path: wolfssl
     - name: brew
-      run: brew install automake libtool  
+      run: |
+        brew install automake libtool mosquitto coreutils
+        echo "/usr/local/sbin/" >> $GITHUB_PATH
+        echo "/usr/local/opt/mosquitto/sbin/" >> $GITHUB_PATH
+
     - name: wolfssl autogen
-      working-directory: ./wolfssl        
+      working-directory: ./wolfssl
       run: ./autogen.sh
     - name: wolfssl configure
-      working-directory: ./wolfssl 
-      run: ./configure
+      working-directory: ./wolfssl
+      run: ./configure --enable-enckeys --prefix=$GITHUB_WORKSPACE/build-dir
     - name: wolfssl make
       working-directory: ./wolfssl
       run: make
     - name: wolfssl make install
       working-directory: ./wolfssl
       run: make install
-    - uses: actions/checkout@master
+
+    - name: Check wolfSSL install dir
+      run: ls $GITHUB_WORKSPACE/build-dir
+
     - name: autogen
       run: ./autogen.sh
+
     - name: configure
-      run: ./configure
+      run: ./configure --with-libwolfssl-prefix=$GITHUB_WORKSPACE/build-dir
     - name: make
       run: make
     - name: make check
       run: make check
+
+    - name: configure without TLS
+      run: ./configure --enable-all --disable-tls
+    - name: make
+      run: make
+    - name: make check
+      run: make check
+
     - name: configure with SN Enabled
-      run: ./configure --enable-sn
+      run: ./configure --enable-sn --with-libwolfssl-prefix=$GITHUB_WORKSPACE/build-dir
     - name: make
       run: make
     - name: make check
       run: make check
+
     - name: configure with Non-Block
-      run: ./configure --enable-nonblock CFLAGS="-DWOLFMQTT_TEST_NONBLOCK"
+      run: ./configure --enable-nonblock CFLAGS="-DWOLFMQTT_TEST_NONBLOCK" --with-libwolfssl-prefix=$GITHUB_WORKSPACE/build-dir
     - name: make
       run: make
     - name: make check
       run: make check
+
     - name: configure with Non-Block and Multi-threading
-      run: ./configure --enable-mt --enable-nonblock CFLAGS="-DWOLFMQTT_TEST_NONBLOCK"
+      run: ./configure --enable-mt --enable-nonblock CFLAGS="-DWOLFMQTT_TEST_NONBLOCK" --with-libwolfssl-prefix=$GITHUB_WORKSPACE/build-dir
     - name: make
       run: make
     - name: make check
       run: make check
+
+    # capture logs on failure
+    - name: Show logs on failure
+      if: failure() || cancelled()
+      run: |
+        cat test-suite.log
+        cat scripts/*.log

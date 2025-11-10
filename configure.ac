@@ -1,12 +1,15 @@
 # wolfmqtt
-# Copyright (C) 2022 wolfSSL Inc.
+# Copyright (C) 2025 wolfSSL Inc.
 # All right reserved.
 
-AC_COPYRIGHT([Copyright (C) 2014-2022 wolfSSL Inc.])
-AC_INIT([wolfmqtt],[1.14.0],[https://github.com/wolfssl/wolfMQTT/issues],[wolfmqtt],[http://www.wolfssl.com])
+AC_COPYRIGHT([Copyright (C) 2014-2025 wolfSSL Inc.])
+AC_INIT([wolfmqtt],[1.20.0],[https://github.com/wolfssl/wolfMQTT/issues],[wolfmqtt],[http://www.wolfssl.com])
 
 AC_PREREQ([2.63])
 AC_CONFIG_AUX_DIR([build-aux])
+
+# Check for pkg-config
+PKG_PROG_PKG_CONFIG
 
 # The following sets CFLAGS to empty if unset on command line.
 : ${CFLAGS=""}
@@ -16,6 +19,7 @@ xxx_ar_flags=$(ar --help 2>&1)
 AS_CASE([$xxx_ar_flags],[*'use actual timestamps and uids/gids'*],[: ${AR_FLAGS="Ucru"}])
 
 AC_CANONICAL_HOST
+AC_CANONICAL_TARGET
 
 AM_INIT_AUTOMAKE([1.11 -Wall -Werror -Wno-portability foreign tar-ustar subdir-objects no-define color-tests])
 
@@ -23,7 +27,7 @@ AC_ARG_PROGRAM
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_HEADERS([src/config.h])
 
-WOLFMQTT_LIBRARY_VERSION=13:0:0
+WOLFMQTT_LIBRARY_VERSION=18:0:0
 #                        | | |
 #                 +------+ | +---+
 #                 |        |     |
@@ -50,19 +54,49 @@ AS_IF([test -n "$CFLAG_VISIBILITY"],
 # silent
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
 
+#
+m4_pattern_allow([AC_CHECK_LIB])
+m4_pattern_allow([AC_MSG_ERROR])
+
 # Checks for programs.
 AC_PROG_CC
 AM_PROG_CC_C_O
 AC_PROG_INSTALL
 
-# Checks for header files.
-AC_HEADER_STDC
 AC_CHECK_SIZEOF([long long], 8)
 AC_CHECK_SIZEOF([long], 4)
 
 # Check headers/libs
+AC_CHECK_HEADERS([arpa/inet.h fcntl.h limits.h netdb.h netinet/in.h stddef.h time.h sys/ioctl.h sys/socket.h sys/time.h errno.h sys/un.h])
 AC_CHECK_FUNCS([gethostbyname getaddrinfo gettimeofday inet_ntoa memset socket signal rand])
 AC_CHECK_LIB([network],[socket])
+
+#wolfssl
+AC_MSG_CHECKING([for wolfSSL])
+if test "x$prefix" = "xNONE"
+then
+    wcpath=$ac_default_prefix
+else
+    wcpath=$prefix
+fi
+AC_MSG_NOTICE([prefix ${prefix}])
+WOLFSSL_URL="http://www.wolfssl.com/download.html"
+AC_ARG_WITH(libwolfssl-prefix,
+  [AS_HELP_STRING([--with-libwolfssl-prefix=PATH], [PATH to wolfssl install (default /usr/local)])],
+  [
+    if test "x$withval" != "xno" ; then
+      if test -d "${withval}/lib" && test -d "${withval}/include"; then
+        wcpath=${withval}
+      else
+        AC_MSG_ERROR([wolfSSL path error (${withval}): missing lib and include])
+      fi
+    fi
+  ]
+)
+
+LDFLAGS="$LDFLAGS -L${wcpath}/lib"
+CPPFLAGS="$CPPFLAGS -I${wcpath}/include"
+
 
 # DEBUG
 DEBUG_CFLAGS="-g -O0 -DDEBUG_WOLFMQTT"
@@ -81,7 +115,8 @@ AX_PTHREAD([
     # -Xcompiler libtool will use it. Newer versions of clang don't need
     # the -Q flag when using pthreads.
     AS_CASE([$PTHREAD_CFLAGS],[-Qunused-arguments*],[PTHREAD_CFLAGS="-Xcompiler $PTHREAD_CFLAGS"])
-    AM_CFLAGS="$AM_CFLAGS $PTHREAD_CFLAGS"])
+    AM_CFLAGS="$AM_CFLAGS $PTHREAD_CFLAGS"
+])
 
 
 # Checks for typedefs, structures, and compiler characteristics.
@@ -137,7 +172,8 @@ if test "x$ENABLED_TLS" = "xyes"
 then
     AM_CFLAGS="$AM_CFLAGS -DENABLE_MQTT_TLS"
 
-    TAO_REQUIRE_LIBWOLFSSL
+AC_CHECK_LIB([wolfssl],[wolfCrypt_Init],,[AC_MSG_ERROR([libwolfssl is required and wasn't found on the system. It can be obtained from https://www.wolfssl.com/download.html/.])])
+
 fi
 
 
@@ -213,6 +249,27 @@ then
 fi
 
 
+# libcurl support
+AC_ARG_ENABLE([curl],
+    [AS_HELP_STRING([--enable-curl],[Enable curl easy socket backend  (default: disabled)])],
+    [ ENABLED_CURL=$enableval ],
+    [ ENABLED_CURL=no ]
+    )
+
+if test "x$ENABLED_CURL" = "xyes"; then
+    if test "x$ENABLED_ALL" = "xyes"; then
+        AC_MSG_ERROR([--enable-all and --enable-curl are incompatible])
+    fi
+
+    if test "x$ENABLED_SN" = "xyes"; then
+        AC_MSG_ERROR([--enable-sn and --enable-curl are incompatible])
+    fi
+
+    AM_CFLAGS="$AM_CFLAGS -DENABLE_MQTT_CURL"
+
+    AC_CHECK_LIB([curl],[curl_easy_init],,[AC_MSG_ERROR([libcurl is required and wasn't found on the system. It can be obtained from https://curl.se/download.html.])])
+fi
+
 # MQTT v5.0
 AC_ARG_ENABLE([v5],
     [AS_HELP_STRING([--enable-v5],[Enable MQTT v5.0 support (default: disabled)])],
@@ -278,16 +335,86 @@ then
     AM_CFLAGS="$AM_CFLAGS -DWOLFMQTT_MULTITHREAD"
 fi
 
+# Stress test convenience build option.
+AC_ARG_ENABLE([stress],
+    [AS_HELP_STRING([--enable-stress],[Enable stress test (default: disabled)])],
+    [ ENABLED_STRESS=$enableval ],
+    [ ENABLED_STRESS=no ]
+    )
 
+# Set defaults of t5,p4 if unset (5 tasks, 4 pubs per task).
+NUM_TASKS=5
+NUM_PUBS=4
+
+for v in `echo $ENABLED_STRESS | tr "," " "`; do
+    case $v in
+    yes)
+        ENABLED_STRESS="yes"
+        ;;
+    no)
+        ENABLED_STRESS="no"
+        ;;
+    t*)
+        NUM_TASKS=`echo $v | cut -c 2-`
+        ;;
+    p*)
+        NUM_PUBS=`echo $v | cut -c 2-`
+        ;;
+    *)
+        AC_MSG_ERROR([enable-stress: arg $v not supported])
+        ;;
+    esac
+done
+
+if test "x$ENABLED_STRESS" != "xno"; then
+    if test "x$ENABLED_ALL" = "xyes"; then
+        AC_MSG_ERROR([--enable-all and --enable-stress are incompatible])
+    fi
+
+    if test "x$ENABLED_SN" = "xyes"; then
+        AC_MSG_ERROR([--enable-sn and --enable-stress are incompatible])
+    fi
+
+    ENABLED_TIMEOUT=yes
+    ENABLED_NONBLOCK=yes
+    ENABLED_MULTITHREAD=yes
+    AM_CFLAGS="$AM_CFLAGS -DWOLFMQTT_STRESS"
+    AM_CFLAGS="$AM_CFLAGS -DWOLFMQTT_NONBLOCK"
+    AM_CFLAGS="$AM_CFLAGS -DWOLFMQTT_TEST_NONBLOCK"
+    AM_CFLAGS="$AM_CFLAGS -DWOLFMQTT_TEST_NONBLOCK_TIMES=2"
+    AM_CFLAGS="$AM_CFLAGS -DWOLFMQTT_MULTITHREAD"
+    AM_CFLAGS="$AM_CFLAGS -DNUM_PUB_TASKS=$NUM_TASKS"
+    AM_CFLAGS="$AM_CFLAGS -DNUM_PUB_PER_TASK=$NUM_PUBS"
+fi
+
+# WebSocket
+AC_ARG_ENABLE([websocket],
+    [AS_HELP_STRING([--enable-websocket],[Enable WebSocket support (default: disabled)])],
+    [ ENABLED_WEBSOCKET=$enableval ],
+    [ ENABLED_WEBSOCKET=no ]
+    )
+
+if test "x$ENABLED_WEBSOCKET" = "xyes"
+then
+    AM_CFLAGS="$AM_CFLAGS -DENABLE_MQTT_WEBSOCKET"
+    ENABLED_WEBSOCKET=yes
+
+    # Check for libwebsockets
+    AC_CHECK_LIB([websockets], [lws_create_context],
+        [LIBS="$LIBS -lwebsockets"],
+        [AC_MSG_ERROR([libwebsockets not found. Install libwebsockets or use --disable-websocket])])
+fi
 
 AM_CONDITIONAL([HAVE_LIBWOLFSSL], [test "x$ENABLED_TLS" = "xyes"])
+AM_CONDITIONAL([HAVE_LIBCURL], [test "x$ENABLED_CURL" = "xyes"])
+AM_CONDITIONAL([BUILD_STRESS], [test "x$ENABLED_STRESS" != "xno"])
 AM_CONDITIONAL([BUILD_EXAMPLES], [test "x$ENABLED_EXAMPLES" = "xyes"])
 AM_CONDITIONAL([BUILD_STDINCAP], [test "x$ENABLED_STDINCAP" = "xyes"])
 AM_CONDITIONAL([BUILD_SN], [test "x$ENABLED_SN" = "xyes"])
 AM_CONDITIONAL([BUILD_MQTT5], [test "x$ENABLED_MQTTV50" = "xyes"])
 AM_CONDITIONAL([BUILD_NONBLOCK], [test "x$ENABLED_NONBLOCK" = "xyes"])
 AM_CONDITIONAL([BUILD_MULTITHREAD], [test "x$ENABLED_MULTITHREAD" = "xyes"])
-
+AM_CONDITIONAL([BUILD_WEBSOCKET], [test "x$ENABLED_WEBSOCKET" = "xyes"])
 
 
 # HARDEN FLAGS
@@ -353,7 +480,7 @@ for option in $OPTION_FLAGS; do
             continue
         fi
 
-        # allow user to igonore system options
+        # allow user to ignore system options
         ignoresys=no
         if [[[ $noequalsign == _* ]]] ;
         then
@@ -411,4 +538,7 @@ echo "   * Examples:                  $ENABLED_EXAMPLES"
 echo "   * Non-Blocking:              $ENABLED_NONBLOCK"
 echo "   * STDIN Capture:             $ENABLED_STDINCAP"
 echo "   * TLS:                       $ENABLED_TLS"
+echo "   * CURL:                      $ENABLED_CURL"
 echo "   * Multi-thread:              $ENABLED_MULTITHREAD"
+echo "   * Stress:                    $ENABLED_STRESS"
+echo "   * WebSocket:                 $ENABLED_WEBSOCKET"

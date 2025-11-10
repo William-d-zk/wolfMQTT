@@ -1,6 +1,6 @@
 /* mqttexample.h
  *
- * Copyright (C) 2006-2022 wolfSSL Inc.
+ * Copyright (C) 2006-2025 wolfSSL Inc.
  *
  * This file is part of wolfMQTT.
  *
@@ -22,6 +22,8 @@
 #ifndef WOLFMQTT_EXAMPLE_H
 #define WOLFMQTT_EXAMPLE_H
 
+#include "wolfmqtt/mqtt_client.h"
+
 #ifdef __cplusplus
     extern "C" {
 #endif
@@ -41,7 +43,7 @@
     /* For Linux/Mac */
     #if !defined(FREERTOS) && !defined(USE_WINDOWS_API) && \
         !defined(FREESCALE_MQX) && !defined(FREESCALE_KSDK_MQX) && \
-        !defined(MICROCHIP_MPLAB_HARMONY)
+        !defined(MICROCHIP_MPLAB_HARMONY) && !defined(WOLFMQTT_ZEPHYR)
         /* Make sure its not explicitly disabled and not already defined */
         #if !defined(WOLFMQTT_NO_STDIN_CAP) && \
             !defined(WOLFMQTT_ENABLE_STDIN_CAP)
@@ -74,11 +76,16 @@
 
 #define DEFAULT_CMD_TIMEOUT_MS  30000
 #define DEFAULT_CON_TIMEOUT_MS  5000
+#define DEFAULT_CHK_TIMEOUT_S   2
 #define DEFAULT_MQTT_QOS        MQTT_QOS_0
 #define DEFAULT_KEEP_ALIVE_SEC  60
 #define DEFAULT_CLIENT_ID       "WolfMQTTClient"
-#define WOLFMQTT_TOPIC_NAME     "wolfMQTT/example/"
-#define DEFAULT_TOPIC_NAME      WOLFMQTT_TOPIC_NAME"testTopic"
+#ifndef WOLFMQTT_TOPIC_NAME
+    #define WOLFMQTT_TOPIC_NAME     "wolfMQTT/example/"
+    #define DEFAULT_TOPIC_NAME      WOLFMQTT_TOPIC_NAME"testTopic"
+#else
+    #define DEFAULT_TOPIC_NAME      WOLFMQTT_TOPIC_NAME
+#endif
 #define DEFAULT_AUTH_METHOD    "EXTERNAL"
 #define PRINT_BUFFER_SIZE       80
 #define DEFAULT_MESSAGE         "test"
@@ -90,6 +97,19 @@
 #define DEFAULT_SESS_EXP_INT    0xFFFFFFFF
 #endif
 
+/* certs are either static or extern, depending on the specific example */
+#ifndef EXTERNAL_MQTT_TLS_CALLBACK
+#ifdef WOLFMQTT_EXTERN_CERT
+    #undef  WOLFMQTT_EXAMPLE_CERT
+    #define WOLFMQTT_EXAMPLE_CERT /* init extern from mqttexample.h */
+    extern const char* root_ca;
+    extern const char* device_cert;
+    extern const char* device_priv_key;
+#else
+    #undef  WOLFMQTT_EXAMPLE_CERT
+    #define WOLFMQTT_EXAMPLE_CERT static
+#endif
+#endif /* !EXTERNAL_MQTT_TLS_CALLBACK */
 /* MQTT Client state */
 typedef enum _MQTTCtxState {
     WMQ_BEGIN = 0,
@@ -142,6 +162,11 @@ typedef struct _MQTTCtx {
     const char* message;
     const char* pub_file;
     const char* client_id;
+#if defined (ENABLE_MQTT_TLS)
+    const char* ca_file;
+    const char* mtls_keyfile;
+    const char* mtls_certfile;
+#endif
     byte *tx_buf, *rx_buf;
     int return_code;
     int use_tls;
@@ -162,6 +187,7 @@ typedef struct _MQTTCtx {
 #endif
     byte    clean_session;
     byte    test_mode;
+    byte    debug_on:1; /* enable debug messages in example */
 #ifdef WOLFMQTT_V5
     byte    subId_not_avail; /* Server property */
     byte    enable_eauth; /* Enhanced authentication */
@@ -182,13 +208,25 @@ int mqtt_parse_args(MQTTCtx* mqttCtx, int argc, char** argv);
 int err_sys(const char* msg);
 
 int mqtt_tls_cb(MqttClient* client);
+
+#ifdef WOLFMQTT_SN
+int mqtt_dtls_cb(MqttClient* client);
+#endif
+
 word16 mqtt_get_packetid(void);
 
 #ifdef WOLFMQTT_NONBLOCK
 int mqtt_check_timeout(int rc, word32* start_sec, word32 timeout_sec);
 #endif
 
+int mqtt_fill_random_hexstr(char* buf, word32 bufLen);
+char* mqtt_append_random(const char* inStr, word32 inLen);
+
 int mqtt_file_load(const char* filePath, byte** fileBuf, int *fileLen);
+
+#ifdef WOLFSSL_ENCRYPTED_KEYS
+int mqtt_password_cb(char* passwd, int sz, int rw, void* userdata);
+#endif
 
 #ifdef __cplusplus
     } /* extern "C" */

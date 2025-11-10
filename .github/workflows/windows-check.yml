@@ -2,7 +2,7 @@ name: Windows Build Test
 
 on:
   push:
-    branches: [ '*' ]
+    branches: [ 'master', 'main', 'release/**' ]
   pull_request:
     branches: [ '*' ]
 
@@ -27,6 +27,7 @@ env:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 10
 
     steps:
     - uses: actions/checkout@v2
